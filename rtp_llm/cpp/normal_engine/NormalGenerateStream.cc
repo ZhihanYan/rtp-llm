@@ -5,11 +5,11 @@ namespace rtp_llm {
 
 ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
     // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!stopped()) && !finished() && generate_outputs_queue_.isEmpty()) {
+    while ((!hasError()) && !finished() && generate_outputs_queue_.isEmpty()) {
         checkTimeout();
         generate_outputs_queue_.waitNotEmpty();
     }
-    if (stopped()) {
+    if (hasError()) {
         return statusInfo();
     }
     if (generate_outputs_queue_.isEmpty()) {
@@ -157,7 +157,7 @@ void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_resu
     if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
-        setStopWithoutLock(ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
+        reportError(ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
         generate_outputs_queue_.push(std::move(generate_results));
     }
@@ -219,7 +219,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
-    if (stoppedWithoutLock()) {
+    if (hasError()) {
         return;
     }
 

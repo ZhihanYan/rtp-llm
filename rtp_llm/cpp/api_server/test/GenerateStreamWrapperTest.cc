@@ -86,7 +86,7 @@ TEST_F(GenerateStreamWrapperTest, generateResponse) {
         ASSERT_EQ(finished, true);
     }
     // EXPECT_CALL(*mock_stream, finished()).WillOnce(Return(false));
-    // EXPECT_CALL(*mock_stream, stopped()).WillOnce(Return(false));
+    // EXPECT_CALL(*mock_stream, hasError()).WillOnce(Return(false));
     // EXPECT_CALL(*mock_stream, cancel()).Times(1);
 }
 

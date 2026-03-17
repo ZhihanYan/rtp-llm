@@ -34,7 +34,7 @@ ErrorInfo PrefillGenerateContextNew::init(const std::shared_ptr<EngineBase>& eng
 
 void PrefillGenerateContextNew::stopStream() {
     if (stream_ != nullptr && stream_->running()) {
-        stream_->setStop(error_info.code(), error_info.ToString());
+        stream_->reportError(error_info.code(), error_info.ToString());
     }
 
     // if (stream_) {

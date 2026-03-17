@@ -144,6 +144,9 @@ public:
     void                 fakeInitKVBlock(size_t reserved_blocks = 0);
     virtual absl::Status initKVBlock(size_t reserve_step = 0);
     virtual absl::Status incrKVBlock(size_t reserve_step = 0);
+    bool                 asyncLoadCache();
+    bool                 isLoaded() const;
+    bool                 loadCacheDone();
     virtual void         releaseResource();
     int                  nextNeedBlockNums(int reserve_step) const;
     void                 setNeedReleaseResource(bool need_release_resource);
@@ -224,15 +227,15 @@ public:
     int64_t      getTimeoutMs() const;
     void         checkTimeout();
     void         setStop(ErrorCode error_code, const std::string& error_msg);
-    void         setStopWithoutLock(ErrorCode error_code, const std::string& error_msg);
     void         stopAndRelease(ErrorCode error_code, const std::string& error_msg);
+    void         reportError(ErrorCode error_code, const std::string& error_msg);
+    bool         hasError() const;
     ErrorInfo    statusInfo();
     bool         isDoneWithoutLock(int batch_id) const;
-    void         setPaused();
     bool         setRunning();
-    bool         stoppedWithoutLock();
-    virtual bool stopped();
-    bool         paused();
+    bool         setLoadingCache();
+    bool         setWaiting();
+    bool         loadingCache();
     std::string  stopReason();
     virtual bool finished();
     bool         running();
@@ -514,9 +517,7 @@ protected:
     int64_t                              vocab_size_;
     std::shared_ptr<CompleteTokenIds>    complete_token_ids_;
     int64_t                              begin_time_us_;
-    int64_t                              last_pause_us_ = 0;
-    int64_t                              pause_time_us_ = 0;
-    int64_t                              wait_time_us_  = 0;
+    int64_t                              wait_time_us_ = 0;
     std::shared_ptr<StreamCacheResource> stream_cache_resource_;
     std::shared_ptr<bool>                is_context_stream_;
     size_t                               iter_count_           = 0;
@@ -540,6 +541,10 @@ protected:
     volatile bool need_remote_generate_ = false;
 
     bool gen_timeline_ = false;
+
+    // Error reporting: external threads set errors via reportError(),
+    // scheduler consumes them on the next scheduling round
+    bool has_error_ = false;
 
     // The number of times this stream has been interfered by prefills
     int32_t batch_with_prefill_times_ = 0;
@@ -585,6 +590,7 @@ protected:
     bool perf_test_ = false;
     friend class StreamCacheResource;
     bool is_fake_stream_ = false;
+    bool loaded_         = false;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

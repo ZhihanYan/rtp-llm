@@ -94,7 +94,7 @@ void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {
     if (!status.ok()) {
         string error_msg = "request: [" + decode_context.request_key + "] malloc kv cache block failed at decode node";
         RTP_LLM_LOG_ERROR(error_msg);
-        generate_stream->setStop(ErrorCode::DECODE_MALLOC_FAILED, "decode malloc failed");
+        generate_stream->reportError(ErrorCode::DECODE_MALLOC_FAILED, "decode malloc failed");
         decode_context.error_status = grpc::Status(grpc::StatusCode::RESOURCE_EXHAUSTED, error_msg);
         return;
     }
