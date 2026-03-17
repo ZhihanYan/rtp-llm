@@ -3,7 +3,7 @@
 namespace rtp_llm {
 
 GenerateContext::~GenerateContext() {
-    if (stream_ && !stream_->finished() && !stream_->stopped()) {
+    if (stream_ && !stream_->finished()) {
         stream_->cancel();
     }
     stopStream();

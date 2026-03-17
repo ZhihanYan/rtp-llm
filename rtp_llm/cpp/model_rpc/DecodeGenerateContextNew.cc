@@ -5,7 +5,7 @@ namespace rtp_llm {
 
 DecodeGenerateContextNew::~DecodeGenerateContextNew() {
     if (stream_ != nullptr && stream_->running()) {
-        stream_->setStop(error_info.code(), error_info.ToString());
+        stream_->reportError(error_info.code(), error_info.ToString());
     }
     reportTime();
 }

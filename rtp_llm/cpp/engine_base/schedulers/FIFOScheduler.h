@@ -45,14 +45,15 @@ protected:
     virtual std::list<GenerateStreamPtr> scheduleNew(size_t reserve_step);
 
 private:
-    void    evictDoneStreams(std::list<GenerateStreamPtr>& streams);
-    bool    evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
-                              const GenerateStreamPtr&            new_stream,
-                              size_t                              reserve_step);
-    int     evaluateRunningNext(size_t reserve_step);
-    void    evaluateRunningRemote();
-    int64_t lastScheduleTime() override;
-    int     runningNextBlockNum(size_t reserve_step) const;
+    void                         evictDoneStreams(std::list<GenerateStreamPtr>& streams);
+    bool                         evaluateNewStream(const std::list<GenerateStreamPtr>& streams,
+                                                   const GenerateStreamPtr&            new_stream,
+                                                   size_t                              reserve_step);
+    int                          evaluateRunningNext(size_t reserve_step);
+    void                         evaluateRunningRemote();
+    std::list<GenerateStreamPtr> evaluateLoadingCacheStreams();
+    int64_t                      lastScheduleTime() override;
+    int                          runningNextBlockNum(size_t reserve_step) const;
     bool evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams, const GenerateStreamPtr& new_stream) const;
     void accountBatchMetrics(const std::list<GenerateStreamPtr>& new_streams,
                              const std::list<GenerateStreamPtr>& running_streams);
@@ -62,6 +63,7 @@ protected:
     PDSepConfig                     pd_sep_config_;
     ModelSpecificConfig             model_specific_config_;
     std::list<GenerateStreamPtr>    waiting_streams_;
+    std::list<GenerateStreamPtr>    loading_cache_streams_;
     std::list<GenerateStreamPtr>    running_streams_;
     std::list<GenerateStreamPtr>    remote_running_streams_;
     std::shared_ptr<KVCacheManager> cache_manager_;

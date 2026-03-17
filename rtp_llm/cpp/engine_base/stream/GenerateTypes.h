@@ -108,9 +108,8 @@ public:
 
 enum class StreamState {
     WAITING,
+    LOADING_CACHE,  // GPU blocks allocated, waiting for connector H2D copy
     RUNNING,
-    PAUSED,
-    STOPPED,
     FINISHED,
     REMOTE_RUNNING
 };
@@ -119,12 +118,10 @@ inline std::string StreamStateToString(StreamState state) {
     switch (state) {
         case StreamState::WAITING:
             return "WAITING";
+        case StreamState::LOADING_CACHE:
+            return "LOADING_CACHE";
         case StreamState::RUNNING:
             return "RUNNING";
-        case StreamState::PAUSED:
-            return "PAUSED";
-        case StreamState::STOPPED:
-            return "STOPPED";
         case StreamState::FINISHED:
             return "FINISHED";
         case StreamState::REMOTE_RUNNING:

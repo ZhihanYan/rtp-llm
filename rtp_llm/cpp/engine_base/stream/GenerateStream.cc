@@ -119,15 +119,13 @@ const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
 }
 
 void GenerateStream::cancel() {
-    setStop(ErrorCode::CANCELLED, "cancel stream");
+    reportError(ErrorCode::CANCELLED, "cancel stream");
 }
 
 absl::Status GenerateStream::initKVBlock(size_t reserve_step) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     if (generate_status_->status == StreamState::WAITING) {
         wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
-    } else if (generate_status_->status == StreamState::PAUSED) {
-        pause_time_us_ += autil::TimeUtility::currentTimeInMicroSeconds() - last_pause_us_;
     }
     return stream_cache_resource_->initKVBlock(reserve_step);
 }
@@ -140,6 +138,19 @@ void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
 absl::Status GenerateStream::incrKVBlock(size_t reserve_step) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     return stream_cache_resource_->incrKVBlock(reserve_step);
+}
+
+bool GenerateStream::asyncLoadCache() {
+    loaded_ = true;
+    return stream_cache_resource_->asyncLoadCache();
+}
+
+bool GenerateStream::isLoaded() const {
+    return loaded_;
+}
+
+bool GenerateStream::loadCacheDone() {
+    return stream_cache_resource_->loadCacheDone();
 }
 
 void GenerateStream::releaseResource() {
@@ -284,9 +295,9 @@ bool GenerateStream::updatePrefix(const std::shared_ptr<SystemPrompt>& system_pr
         if (!prefix_param.prompt_tokens.empty()) {
             auto total_input_len = inputLength() + prefix_param.prompt_tokens.size();
             if (total_input_len >= max_seq_len_) {
-                setStop(ErrorCode::LONG_PROMPT_ERROR,
-                        "after update prefix, total input len " + std::to_string(total_input_len)
-                            + " is greater than max seq len " + std::to_string(max_seq_len_));
+                reportError(ErrorCode::LONG_PROMPT_ERROR,
+                            "after update prefix, total input len " + std::to_string(total_input_len)
+                                + " is greater than max seq len " + std::to_string(max_seq_len_));
                 return false;
             }
             generate_input_->updatePrefix(prefix_param.prompt_tokens);
@@ -472,13 +483,14 @@ void GenerateStream::checkTimeout() {
     auto running_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     auto timeout_ms      = getTimeoutMs();
     if (timeout_ms > 0 && timeout_ms < running_time_ms) {
-        setStop(ErrorCode::GENERATE_TIMEOUT,
-                "query has been running " + std::to_string(running_time_ms) + " ms, "
-                    + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
+        reportError(ErrorCode::GENERATE_TIMEOUT,
+                    "query has been running " + std::to_string(running_time_ms) + " ms, "
+                        + "timeout_ms = " + std::to_string(timeout_ms) + ", it's timeout");
     }
 }
 
-void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string& error_msg) {
+void GenerateStream::setStop(ErrorCode error_code, const std::string& error_msg) {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
     auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
     RTP_LLM_LOG_WARNING("stop stream [%ld], error msg: [%s], current state [%s], "
                         "input len [%d], seq len [%d], timeout [%ld] ms, running [%ld] ms",
@@ -489,19 +501,27 @@ void GenerateStream::setStopWithoutLock(ErrorCode error_code, const std::string&
                         seqLength(),
                         getTimeoutMs(),
                         cost_time_ms);
-    generate_status_->status     = StreamState::STOPPED;
+    has_error_                   = true;
+    generate_status_->status     = StreamState::FINISHED;
     generate_status_->error_info = ErrorInfo(error_code, error_msg);
     cv_->notify_one();
-}
-
-void GenerateStream::setStop(ErrorCode error_code, const std::string& error_msg) {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
-    setStopWithoutLock(error_code, error_msg);
 }
 
 void GenerateStream::stopAndRelease(ErrorCode error_code, const std::string& error_msg) {
     setStop(error_code, error_msg);
     releaseResource();
+}
+
+void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    if (!has_error_) {
+        has_error_                   = true;
+        generate_status_->error_info = ErrorInfo(error_code, error_msg);
+    }
+}
+
+bool GenerateStream::hasError() const {
+    return has_error_;
 }
 
 ErrorInfo GenerateStream::statusInfo() {
@@ -511,26 +531,33 @@ ErrorInfo GenerateStream::statusInfo() {
 
 bool GenerateStream::isDoneWithoutLock(int batch_id) const {
     auto status = sub_generate_status_[batch_id].status;
-    return status == StreamState::FINISHED || status == StreamState::STOPPED;
-}
-
-void GenerateStream::setPaused() {
-    // TODO(xinfei.sxf) fix mutex name
-    std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (stoppedWithoutLock()) {
-        return;
-    }
-    *is_context_stream_      = true;
-    generate_status_->status = StreamState::PAUSED;
-    last_pause_us_           = autil::TimeUtility::currentTimeInMicroSeconds();
+    return status == StreamState::FINISHED;
 }
 
 bool GenerateStream::setRunning() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (stoppedWithoutLock()) {
+    if (finishedWithoutLock()) {
         return false;
     }
     generate_status_->status = StreamState::RUNNING;
+    return true;
+}
+
+bool GenerateStream::setLoadingCache() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    if (generate_status_->status != StreamState::WAITING) {
+        return false;
+    }
+    generate_status_->status = StreamState::LOADING_CACHE;
+    return true;
+}
+
+bool GenerateStream::setWaiting() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    if (generate_status_->status != StreamState::LOADING_CACHE) {
+        return false;
+    }
+    generate_status_->status = StreamState::WAITING;
     return true;
 }
 
@@ -540,23 +567,14 @@ void GenerateStream::setFinishedWithoutLock() {
     cv_->notify_one();
 }
 
-bool GenerateStream::stoppedWithoutLock() {
-    return generate_status_->status == StreamState::STOPPED;
-}
-
-bool GenerateStream::stopped() {
-    std::lock_guard<std::mutex> lock(*output_mutex_);
-    return generate_status_->status == StreamState::STOPPED;
-}
-
 bool GenerateStream::waiting() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     return generate_status_->status == StreamState::WAITING;
 }
 
-bool GenerateStream::paused() {
+bool GenerateStream::loadingCache() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    return generate_status_->status == StreamState::PAUSED;
+    return generate_status_->status == StreamState::LOADING_CACHE;
 }
 
 std::string GenerateStream::stopReason() {
@@ -574,17 +592,19 @@ bool GenerateStream::running() {
 
 void GenerateStream::cancelIfNotRunning() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (generate_status_->status == StreamState::WAITING || generate_status_->status == StreamState::REMOTE_RUNNING) {
+    if (generate_status_->status == StreamState::WAITING || generate_status_->status == StreamState::LOADING_CACHE
+        || generate_status_->status == StreamState::REMOTE_RUNNING) {
         auto cost_time_ms = (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
         RTP_LLM_LOG_WARNING("stop stream: %ld %s, input len [%d], seq len [%d], timeout: [%ld] ms, running [%ld] ms",
                             streamId(),
-                            "cancel stream in waiting or remote running",
+                            "cancel stream in waiting, loading_cache or remote running",
                             inputLength(),
                             seqLength(),
                             getTimeoutMs(),
                             cost_time_ms);
-        generate_status_->status     = StreamState::STOPPED;
-        generate_status_->error_info = ErrorInfo(ErrorCode::CANCELLED, "cancel stream in waiting or remote running");
+        generate_status_->status = StreamState::FINISHED;
+        generate_status_->error_info =
+            ErrorInfo(ErrorCode::CANCELLED, "cancel stream in waiting, loading_cache or remote running");
     }
 }
 
@@ -604,7 +624,7 @@ bool GenerateStream::needRemoteGenerate() const {
 
 bool GenerateStream::setRemoteGenerate() {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (stoppedWithoutLock() || finishedWithoutLock()) {
+    if (finishedWithoutLock()) {
         return false;
     }
     generate_status_->status = StreamState::REMOTE_RUNNING;
@@ -697,12 +717,9 @@ void GenerateStream::matchEosToken(int batch_id) {
 bool GenerateStream::waitForRemoteGenerate() {
     std::unique_lock<std::mutex> lock(*output_mutex_);
     // Wait until need_remote_generate_ is true or stream status -> done
-    cv_->wait(lock, [this] {
-        return need_remote_generate_ || generate_status_->status == StreamState::STOPPED
-               || generate_status_->status == StreamState::FINISHED;
-    });
+    cv_->wait(lock, [this] { return need_remote_generate_ || finishedWithoutLock(); });
     // If stream status is abnormal, log the error info
-    if (!need_remote_generate_ && generate_status_->status == StreamState::STOPPED) {
+    if (!need_remote_generate_ && hasError()) {
         RTP_LLM_LOG_WARNING("waitForRemoteGenerate exits due to stream [%ld] stopped, error: %s",
                             streamId(),
                             generate_status_->error_info.ToString().c_str());
@@ -746,7 +763,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] spec update", streamId());
     *is_context_stream_ = false;
-    if (stoppedWithoutLock() && !update_info.force_update_info) {
+    if (hasError() && !update_info.force_update_info) {
         return;
     }
 
@@ -769,9 +786,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
-                           "output token id:" + std::to_string(error_token_id)
-                               + " out of vocab size: " + std::to_string(vocab_size_));
+        reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                    "output token id:" + std::to_string(error_token_id)
+                        + " out of vocab size: " + std::to_string(vocab_size_));
         return;
     }
 
@@ -833,7 +850,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
     RTP_LLM_LOG_DEBUG("stream [%ld] update", streamId());
     *is_context_stream_ = false;
-    if (stoppedWithoutLock() && !update_info.force_update_info) {
+    if (hasError() && !update_info.force_update_info) {
         return;
     }
 
@@ -850,9 +867,9 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        setStopWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
-                           "output token id:" + std::to_string(error_token_id)
-                               + " out of vocab size: " + std::to_string(vocab_size_));
+        reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+                    "output token id:" + std::to_string(error_token_id)
+                        + " out of vocab size: " + std::to_string(vocab_size_));
         return;
     }
 
@@ -861,7 +878,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 
-    bool is_done = finishedWithoutLock() || stoppedWithoutLock();
+    bool is_done = finishedWithoutLock();
 
     if (!is_done) {
         updateLogitProcessorStatus(update_info);
@@ -871,7 +888,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
-            setStopWithoutLock(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+            reportError(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
             return;
         }
     }
@@ -962,7 +979,7 @@ void GenerateStream::reportStreamMetrics() {
         RtpLLMStreamMetricsCollector collector;
         collector.qps               = true;
         collector.cancel_qps        = cancelled;
-        collector.error_qps         = stopped() && !cancelled;
+        collector.error_qps         = hasError() && !cancelled;
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (finished() || cancelled || timeout) {
@@ -976,7 +993,6 @@ void GenerateStream::reportStreamMetrics() {
             RTP_LLM_LOG_DEBUG(
                 "stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
             collector.wait_latency_us          = wait_time_us_;
-            collector.pause_latency_us         = pause_time_us_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;
             collector.batch_with_prefill_len   = batch_with_prefill_len_;
             collector.malloc_failed_times      = stream_cache_resource_->mallocFailedTimes();

@@ -16,6 +16,12 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 
+async_cache_test_deps = test_deps + [
+    "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
+    "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
+]
+
 cc_test(
     name = "fifo_scheduler_test",
     srcs = [
@@ -24,6 +30,20 @@ cc_test(
     data = [],
     copts = copts() + ["-fno-access-control"],
     deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
+
+cc_test(
+    name = "fifo_scheduler_async_cache_test",
+    srcs = [
+        "FIFOSchedulerAsyncCacheTest.cc",
+    ],
+    data = [],
+    copts = copts() + ["-fno-access-control"],
+    deps = async_cache_test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

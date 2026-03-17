@@ -33,6 +33,8 @@ public:
     int                  tryReleaseKVBlock(size_t nums);
     void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
     void                 releaseResource();
+    bool                 asyncLoadCache();
+    bool                 loadCacheDone();
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
@@ -128,11 +130,12 @@ private:
     ResourceContext          resource_context_;
     std::vector<BlockIdPair> block_update_mapping_;
 
-    bool need_release_resource_ = true;
-    bool last_block_aligned_    = false;
-    int  malloc_failed_times_   = 0;
-    bool fake_inited_           = false;
-    bool resource_released_     = false;
+    bool                          need_release_resource_ = true;
+    bool                          last_block_aligned_    = false;
+    int                           malloc_failed_times_   = 0;
+    bool                          fake_inited_           = false;
+    bool                          resource_released_     = false;
+    std::shared_ptr<AsyncContext> load_cache_context_;
 };
 
 }  // namespace rtp_llm

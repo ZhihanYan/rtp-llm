@@ -98,9 +98,9 @@ void StreamCacheResource::releaseResource() {
             RTP_LLM_LOG_ERROR("  stream id:                     %ld", stream_->streamId());
             RTP_LLM_LOG_ERROR("  stream state:                  %s",
                               StreamStateToString(stream_->generate_status_->status).c_str());
-            RTP_LLM_LOG_ERROR("  stream stopped:                %d", stream_->stoppedWithoutLock());
             RTP_LLM_LOG_ERROR("  stream finished:               %d", stream_->finishedWithoutLock());
             RTP_LLM_LOG_ERROR("  stream remoteRunning:          %d", stream_->isRemoteRunningWithoutLock());
+            RTP_LLM_LOG_ERROR("  stream hasError:                %d", stream_->hasError());
             RTP_LLM_LOG_ERROR("  stream hasNumBeams:            %d", stream_->hasNumBeams());
         }
         RTP_LLM_LOG_ERROR("  batch_kv_cache_resource_ use_count: %ld", batch_kv_cache_resource_.use_count());
@@ -113,7 +113,7 @@ void StreamCacheResource::releaseResource() {
         abort();
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
-    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->stoppedWithoutLock())) {
+    if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
         return;
     }
     tryReleaseKVBlock(curBlocksNum());
@@ -210,8 +210,6 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
         stream_->setInitialReuseLength(result.reuse_len);
         stream_->setLocalReuseLength(result.reuse_len);
     }
-    // load cache from connector
-    loadCacheSync();
     return absl::OkStatus();
 }
 
@@ -243,6 +241,39 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
     }
 
     return absl::OkStatus();
+}
+
+bool StreamCacheResource::asyncLoadCache() {
+    // load cache from connector
+    if (!reuseCache() || (!enableMemoryCache() && !enableRemoteCache())) {
+        return false;
+    }
+
+    if (load_cache_context_) {
+        return true;  // 已有进行中的 load 任务（幂等）
+    }
+    assert(reuseCache());
+    auto meta              = std::make_shared<MetaImpl>(enableMemoryCache(), enableRemoteCache(), stream_->traceId());
+    auto connector_context = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
+    load_cache_context_    = resource_context_.cache_manager->asyncLoadCache(connector_context);
+    return load_cache_context_ != nullptr;
+}
+
+bool StreamCacheResource::loadCacheDone() {
+    if (!load_cache_context_) {
+        return true;  // 没有 context，视为已完成
+    }
+    if (!load_cache_context_->done()) {
+        return false;  // coordinator 后台线程尚未处理完
+    }
+    // 加载完成（无论成功失败），更新 reuse lengths
+    waitLoadCacheDone(load_cache_context_);
+    if (!load_cache_context_->success()) {
+        load_cache_context_.reset();
+        asyncLoadCache();
+        return false;  // 失败重试，直到成功为止（目前没有失败重试机制，先简单粗暴地直接重试）
+    }
+    return true;
 }
 
 // TODO, delete it soon
@@ -323,11 +354,11 @@ void StreamCacheResource::loadCacheSync() {
     if (!reuseCache() || (!enableMemoryCache() && !enableRemoteCache())) {
         return;
     }
-    assert(reuse_cache());
-    auto meta               = std::make_shared<MetaImpl>(enableMemoryCache(), enableRemoteCache(), stream_->traceId());
-    auto connector_context  = std::make_shared<KVCacheConnectorReadWriteContextImpl>(batch_kv_cache_resource_, meta);
-    auto load_cache_context = resource_context_.cache_manager->asyncLoadCache(connector_context);
-    waitLoadCacheDone(load_cache_context);
+    auto need_load = asyncLoadCache();  // 复用 asyncLoadCache 的 context 构建逻辑
+    if (need_load) {
+        waitLoadCacheDone(load_cache_context_);
+        load_cache_context_.reset();
+    }
 }
 
 void StreamCacheResource::waitLoadCacheDone(const std::shared_ptr<AsyncContext>& load_context) {

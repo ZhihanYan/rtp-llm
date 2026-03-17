@@ -57,7 +57,7 @@ public:
     void evictAllDoneStreams() {
         for (auto it = running_streams_.begin(); it != running_streams_.end();) {
             (*it)->checkTimeout();
-            if ((*it)->stopped() || (*it)->finished()) {
+            if ((*it)->finished()) {
                 // Immediately free resources to run more streams
                 (*it)->releaseResource();
                 RTP_LLM_LOG_DEBUG("evict stream [%ld]", (*it)->streamId());

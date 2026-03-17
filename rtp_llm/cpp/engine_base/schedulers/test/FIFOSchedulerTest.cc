@@ -85,7 +85,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 0);
-    ASSERT_TRUE(stream->stopped());
+    ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "input len 3 is greater than kv cache max available tokens num 2");
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
@@ -118,7 +118,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 1);
-    ASSERT_FALSE(stream->stopped());
+    ASSERT_FALSE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
 
@@ -126,7 +126,7 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
     ASSERT_EQ(streams_status2.value().size(), 0);
-    ASSERT_TRUE(stream->stopped());
+    ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "incrKVBlock failed: LACK MEM");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
 }
@@ -174,7 +174,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 0);
-    ASSERT_TRUE(stream->stopped());
+    ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "LACK MEM");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
     ASSERT_EQ(cache_manager->availableBlocksNum(), 10);
@@ -223,13 +223,13 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
     auto streams_status1 = scheduler.schedule();
     ASSERT_TRUE(streams_status1.ok());
     ASSERT_EQ(streams_status1.value().size(), 1);
-    ASSERT_FALSE(stream->stopped());
+    ASSERT_FALSE(stream->hasError());
 
     stream->setSeqLength(9);
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
     ASSERT_EQ(streams_status2.value().size(), 1);
-    ASSERT_FALSE(stream->stopped());
+    ASSERT_FALSE(stream->hasError());
 }
 
 TEST_F(FIFOSchedulerTest, testReuseCache) {
