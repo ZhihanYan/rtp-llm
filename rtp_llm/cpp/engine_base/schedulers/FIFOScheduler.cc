@@ -132,7 +132,7 @@ int FIFOScheduler::evaluateRunningNext(size_t reserve_step) {
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
                                           const GenerateStreamPtr&       new_stream) const {
     if (pd_sep_config_.role_type == RoleType::DECODE) {
-        if (running_streams_.size() + loading_cache_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
+        if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {
             return true;
         }
     }
@@ -142,20 +142,18 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
             return false;
         }
     }
-    if (running_streams_.size() + loading_cache_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
+    if (running_streams_.size() + streams.size() + 1 > max_generate_batch_size_) {
         return false;
     }
 
     int max_token_size = new_stream->contextLength();
-    if (streams.empty()
-        && max_token_size + running_streams_.size() + loading_cache_streams_.size() < int(max_seq_len_)) {
+    if (streams.empty() && max_token_size + running_streams_.size() < int(max_seq_len_)) {
         return true;
     }
     for (auto& stream : streams) {
         max_token_size = std::max(max_token_size, stream->contextLength());
     }
-    return max_token_size * (streams.size() + 1) + running_streams_.size() + loading_cache_streams_.size()
-           < int(max_batch_tokens_size_);
+    return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
 }
 
 bool FIFOScheduler::evaluateNewStream(const list<GenerateStreamPtr>& streams,

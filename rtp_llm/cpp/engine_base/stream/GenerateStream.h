@@ -542,10 +542,6 @@ protected:
 
     bool gen_timeline_ = false;
 
-    // Error reporting: external threads set errors via reportError(),
-    // scheduler consumes them on the next scheduling round
-    bool has_error_ = false;
-
     // The number of times this stream has been interfered by prefills
     int32_t batch_with_prefill_times_ = 0;
     int32_t batch_with_prefill_len_   = 0;

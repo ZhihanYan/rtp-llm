@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -132,8 +133,21 @@ inline std::string StreamStateToString(StreamState state) {
 }
 
 struct GenerateStatus {
-    StreamState status = StreamState::WAITING;
-    ErrorInfo   error_info;
+    StreamState       status = StreamState::WAITING;
+    ErrorInfo         error_info;
+    std::atomic<bool> has_error{false};
+
+    GenerateStatus() = default;
+    GenerateStatus(const GenerateStatus& other):
+        status(other.status),
+        error_info(other.error_info),
+        has_error(other.has_error.load(std::memory_order_relaxed)) {}
+    GenerateStatus& operator=(const GenerateStatus& other) {
+        status     = other.status;
+        error_info = other.error_info;
+        has_error.store(other.has_error.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        return *this;
+    }
 };
 
 }  // namespace rtp_llm
