@@ -501,7 +501,7 @@ void GenerateStream::setStop(ErrorCode error_code, const std::string& error_msg)
                         seqLength(),
                         getTimeoutMs(),
                         cost_time_ms);
-    has_error_                   = true;
+    generate_status_->has_error.store(true);
     generate_status_->status     = StreamState::FINISHED;
     generate_status_->error_info = ErrorInfo(error_code, error_msg);
     cv_->notify_one();
@@ -514,14 +514,14 @@ void GenerateStream::stopAndRelease(ErrorCode error_code, const std::string& err
 
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*output_mutex_);
-    if (!has_error_) {
-        has_error_                   = true;
+    if (!generate_status_->has_error.load()) {
+        generate_status_->has_error.store(true);
         generate_status_->error_info = ErrorInfo(error_code, error_msg);
     }
 }
 
 bool GenerateStream::hasError() const {
-    return has_error_;
+    return generate_status_->has_error.load();
 }
 
 ErrorInfo GenerateStream::statusInfo() {
