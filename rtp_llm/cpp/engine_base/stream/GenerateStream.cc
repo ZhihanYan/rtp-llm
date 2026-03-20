@@ -520,6 +520,13 @@ void GenerateStream::reportError(ErrorCode error_code, const std::string& error_
     }
 }
 
+void GenerateStream::reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg) {
+    if (!generate_status_->has_error.load()) {
+        generate_status_->has_error.store(true);
+        generate_status_->error_info = ErrorInfo(error_code, error_msg);
+    }
+}
+
 bool GenerateStream::hasError() const {
     return generate_status_->has_error.load();
 }
@@ -786,7 +793,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+        reportErrorWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                     "output token id:" + std::to_string(error_token_id)
                         + " out of vocab size: " + std::to_string(vocab_size_));
         return;
@@ -867,7 +874,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      hasNumBeams(),
                                      streamId(),
                                      error_token_id)) {
-        reportError(ErrorCode::OUT_OF_VOCAB_RANGE,
+        reportErrorWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
                     "output token id:" + std::to_string(error_token_id)
                         + " out of vocab size: " + std::to_string(vocab_size_));
         return;
@@ -888,7 +895,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);
         if (!update_res) {
-            reportError(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
+            reportErrorWithoutLock(ErrorCode::MALLOC_FAILED, "update kv cache blocks failed");
             return;
         }
     }

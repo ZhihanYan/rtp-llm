@@ -229,6 +229,7 @@ public:
     void         setStop(ErrorCode error_code, const std::string& error_msg);
     void         stopAndRelease(ErrorCode error_code, const std::string& error_msg);
     void         reportError(ErrorCode error_code, const std::string& error_msg);
+    void         reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);
     bool         hasError() const;
     ErrorInfo    statusInfo();
     bool         isDoneWithoutLock(int batch_id) const;
