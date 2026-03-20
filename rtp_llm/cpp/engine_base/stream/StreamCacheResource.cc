@@ -270,26 +270,28 @@ bool StreamCacheResource::loadCacheDone() {
     waitLoadCacheDone(load_cache_context_);
     if (!load_cache_context_->success()) {
         load_cache_context_.reset();
-        
+
         // 添加最大重试次数限制（默认 3 次）
         const int MAX_LOAD_CACHE_RETRY = 3;
         if (load_cache_retry_count_ >= MAX_LOAD_CACHE_RETRY) {
-            RTP_LLM_LOG_WARNING("load cache failed after %d retries, stream: [%ld]", 
-                                load_cache_retry_count_, stream_->streamId());
-            // 超过最大重试次数，不再重试，释放资源
+            RTP_LLM_LOG_WARNING(
+                "load cache failed after %d retries, stream: [%ld]", load_cache_retry_count_, stream_->streamId());
+            // 超过最大重试次数，标记错误并释放资源
+            stream_->reportError(ErrorCode::LOAD_CACHE_TIMEOUT,
+                                 "load cache failed after " + std::to_string(MAX_LOAD_CACHE_RETRY) + " retries");
             releaseResource();
             return true;
         }
-        
+
         load_cache_retry_count_++;
-        RTP_LLM_LOG_WARNING("load cache failed, retry count: %d/%d, stream: [%ld]", 
-                            load_cache_retry_count_, MAX_LOAD_CACHE_RETRY, stream_->streamId());
+        RTP_LLM_LOG_WARNING("load cache failed, retry count: %d/%d, stream: [%ld]",
+                            load_cache_retry_count_,
+                            MAX_LOAD_CACHE_RETRY,
+                            stream_->streamId());
         asyncLoadCache();
         return false;  // 失败重试
     }
-    
-    // 加载成功，重置重试计数器
-    load_cache_retry_count_ = 0;
+    load_cache_context_.reset();
     return true;
 }
 

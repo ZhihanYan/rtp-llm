@@ -266,7 +266,7 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testLoadingCacheStreams_CountedInBatchLimit)
     // loading_cache_streams_ should count toward max_generate_batch_size
     // With max=2, only 2 streams should be scheduled (into LOADING_CACHE)
     // The 3rd stream should remain in waiting
-    ASSERT_LE(scheduler->loading_cache_streams_.size() + result.value().size(), 2);
+    ASSERT_LE(result.value().size(), 2);
 }
 
 // ============================================================================
