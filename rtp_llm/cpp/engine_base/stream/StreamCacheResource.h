@@ -136,6 +136,7 @@ private:
     bool                          fake_inited_           = false;
     bool                          resource_released_     = false;
     std::shared_ptr<AsyncContext> load_cache_context_;
+    int                           load_cache_retry_count_ = 0;
 };
 
 }  // namespace rtp_llm
