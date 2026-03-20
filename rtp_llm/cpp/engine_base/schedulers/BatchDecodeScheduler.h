@@ -57,6 +57,10 @@ public:
     void evictAllDoneStreams() {
         for (auto it = running_streams_.begin(); it != running_streams_.end();) {
             (*it)->checkTimeout();
+            // Handle externally reported errors (e.g., cancel)
+            if ((*it)->hasError()) {
+                (*it)->setFinishedWithoutLock();
+            }
             if ((*it)->finished()) {
                 // Immediately free resources to run more streams
                 (*it)->releaseResource();

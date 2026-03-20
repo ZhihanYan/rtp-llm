@@ -141,12 +141,12 @@ absl::Status GenerateStream::incrKVBlock(size_t reserve_step) {
 }
 
 bool GenerateStream::asyncLoadCache() {
-    loaded_ = true;
+    load_initiated_ = true;
     return stream_cache_resource_->asyncLoadCache();
 }
 
 bool GenerateStream::isLoaded() const {
-    return loaded_;
+    return load_initiated_;
 }
 
 bool GenerateStream::loadCacheDone() {
@@ -794,8 +794,8 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                                      streamId(),
                                      error_token_id)) {
         reportErrorWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
-                    "output token id:" + std::to_string(error_token_id)
-                        + " out of vocab size: " + std::to_string(vocab_size_));
+                               "output token id:" + std::to_string(error_token_id)
+                                   + " out of vocab size: " + std::to_string(vocab_size_));
         return;
     }
 
@@ -875,8 +875,8 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      streamId(),
                                      error_token_id)) {
         reportErrorWithoutLock(ErrorCode::OUT_OF_VOCAB_RANGE,
-                    "output token id:" + std::to_string(error_token_id)
-                        + " out of vocab size: " + std::to_string(vocab_size_));
+                               "output token id:" + std::to_string(error_token_id)
+                                   + " out of vocab size: " + std::to_string(vocab_size_));
         return;
     }
 

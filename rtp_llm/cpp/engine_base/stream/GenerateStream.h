@@ -587,7 +587,7 @@ protected:
     bool perf_test_ = false;
     friend class StreamCacheResource;
     bool is_fake_stream_ = false;
-    bool loaded_         = false;
+    bool load_initiated_ = false;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;
