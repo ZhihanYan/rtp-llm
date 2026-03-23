@@ -141,12 +141,12 @@ absl::Status GenerateStream::incrKVBlock(size_t reserve_step) {
 }
 
 bool GenerateStream::asyncLoadCache() {
-    load_initiated_ = true;
+    load_ever_initiated_ = true;
     return stream_cache_resource_->asyncLoadCache();
 }
 
 bool GenerateStream::isLoaded() const {
-    return load_initiated_;
+    return load_ever_initiated_;
 }
 
 bool GenerateStream::loadCacheDone() {
@@ -572,6 +572,11 @@ void GenerateStream::setFinishedWithoutLock() {
     generate_status_->status = StreamState::FINISHED;
     fillSubGenerateStatus(StreamState::FINISHED);
     cv_->notify_one();
+}
+
+void GenerateStream::setFinished() {
+    std::lock_guard<std::mutex> lock(*output_mutex_);
+    setFinishedWithoutLock();
 }
 
 bool GenerateStream::waiting() {

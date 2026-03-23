@@ -244,6 +244,7 @@ public:
     bool         finishedWithoutLock();
     void         cancelIfNotRunning();
     void         setFinishedWithoutLock();
+    void         setFinished();  // Thread-safe version that acquires output_mutex_ before checking error and setting finished
     bool         isRemoteRunningWithoutLock();
     bool         needRemoteGenerate() const;
     bool         setRemoteGenerate();
@@ -587,7 +588,8 @@ protected:
     bool perf_test_ = false;
     friend class StreamCacheResource;
     bool is_fake_stream_ = false;
-    bool load_initiated_ = false;
+    // Indicates whether cache loading has ever been initiated (not necessarily completed)
+    bool load_ever_initiated_ = false;
 };
 
 typedef std::shared_ptr<GenerateStream> GenerateStreamPtr;

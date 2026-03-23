@@ -59,7 +59,7 @@ public:
             (*it)->checkTimeout();
             // Handle externally reported errors (e.g., cancel)
             if ((*it)->hasError()) {
-                (*it)->setFinishedWithoutLock();
+                (*it)->setFinished();
             }
             if ((*it)->finished()) {
                 // Immediately free resources to run more streams

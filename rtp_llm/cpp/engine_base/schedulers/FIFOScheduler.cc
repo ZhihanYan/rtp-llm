@@ -47,6 +47,10 @@ absl::Status FIFOScheduler::stop() {
     {
         lock_guard<mutex> lock(lock_);
         stop_ = true;
+        for (auto& stream : loading_cache_streams_) {
+            stream->cancelIfNotRunning();
+        }
+        loading_cache_streams_.clear();
     }
     cond_.notify_all();
     return absl::OkStatus();
@@ -71,9 +75,9 @@ int64_t FIFOScheduler::lastScheduleTime() {
 void FIFOScheduler::evictDoneStreams(list<GenerateStreamPtr>& streams) {
     for (auto it = streams.begin(); it != streams.end();) {
         (*it)->checkTimeout();
-        // Handle externally reported errors (e.g., cancel)
+        // Handle externally reported errors (e.g., cancel) - use thread-safe method to avoid data race
         if ((*it)->hasError()) {
-            (*it)->setFinishedWithoutLock();
+            (*it)->setFinished();
         }
         if ((*it)->finished()) {
             // Immediately free resources to run more streams
@@ -153,6 +157,7 @@ bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams
     for (auto& stream : streams) {
         max_token_size = std::max(max_token_size, stream->contextLength());
     }
+    // 这里的判断是要求当前调度轮所有请求参与计算的 token 数之和小于 max_batch_tokens_size_，loading_cache_streams 这一轮实际不参与计算，不需要计入。
     return max_token_size * (streams.size() + 1) + running_streams_.size() < int(max_batch_tokens_size_);
 }
 
@@ -232,7 +237,7 @@ std::list<GenerateStreamPtr> FIFOScheduler::evaluateLoadingCacheStreams() {
         }
         // Load completed, check status and release resources if error happened.
         if (stream->hasError()) {
-            stream->setFinishedWithoutLock();
+            stream->setFinished();
             RTP_LLM_LOG_WARNING("stream [%ld] stopped during cache loading", stream->streamId());
             stream->releaseResource();
             it = loading_cache_streams_.erase(it);
@@ -245,7 +250,7 @@ std::list<GenerateStreamPtr> FIFOScheduler::evaluateLoadingCacheStreams() {
             done_streams.emplace_back(stream);
         } else {
             RTP_LLM_LOG_ERROR("stream [%ld] set waiting failed", stream->streamId());
-            stream->setFinishedWithoutLock();
+            stream->setFinished();
             stream->releaseResource();
         }
         it = loading_cache_streams_.erase(it);

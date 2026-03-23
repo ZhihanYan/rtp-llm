@@ -269,27 +269,55 @@ bool StreamCacheResource::loadCacheDone() {
     // 加载完成（无论成功失败），更新 reuse lengths
     waitLoadCacheDone(load_cache_context_);
     if (!load_cache_context_->success()) {
-        load_cache_context_.reset();
-
-        // 添加最大重试次数限制（默认 3 次）
+        // 区分匹配失败和传输失败
+        auto      read_context         = std::dynamic_pointer_cast<FusedAsyncReadContext>(load_cache_context_);
+        bool      should_retry         = false;
         const int MAX_LOAD_CACHE_RETRY = 3;
-        if (load_cache_retry_count_ >= MAX_LOAD_CACHE_RETRY) {
-            RTP_LLM_LOG_WARNING(
-                "load cache failed after %d retries, stream: [%ld]", load_cache_retry_count_, stream_->streamId());
-            // 超过最大重试次数，标记错误并释放资源
-            stream_->reportError(ErrorCode::LOAD_CACHE_TIMEOUT,
-                                 "load cache failed after " + std::to_string(MAX_LOAD_CACHE_RETRY) + " retries");
-            releaseResource();
-            return true;
+        if (read_context && read_context->fusedMatchContext()) {
+            // 检查是否有匹配到的块
+            size_t matched_blocks = 0;
+            for (const auto& match_ctx : read_context->fusedMatchContext()->contexts()) {
+                auto async_match_ctx = std::dynamic_pointer_cast<AsyncMatchContext>(match_ctx);
+                if (async_match_ctx) {
+                    matched_blocks += async_match_ctx->matchedBlockCount();
+                }
+            }
+            // 如果匹配到了块（matched_blocks > 0），说明是传输失败，需要重试，否则是匹配失败，不重试
+            if (matched_blocks > 0) {
+                should_retry = true;
+                RTP_LLM_LOG_WARNING(
+                    "load cache failed (matched %zu blocks but transfer failed), retry count: %d/%d, stream: [%ld]",
+                    matched_blocks,
+                    load_cache_retry_count_,
+                    MAX_LOAD_CACHE_RETRY,
+                    stream_->streamId());
+            } else {
+                RTP_LLM_LOG_WARNING("load cache failed (no blocks matched), continuing without cache, stream: [%ld]",
+                                    stream_->streamId());
+            }
         }
 
-        load_cache_retry_count_++;
-        RTP_LLM_LOG_WARNING("load cache failed, retry count: %d/%d, stream: [%ld]",
-                            load_cache_retry_count_,
-                            MAX_LOAD_CACHE_RETRY,
-                            stream_->streamId());
-        asyncLoadCache();
-        return false;  // 失败重试
+        load_cache_context_.reset();
+
+        if (should_retry) {
+            // 传输失败：保持重试逻辑
+            if (load_cache_retry_count_ >= MAX_LOAD_CACHE_RETRY) {
+                RTP_LLM_LOG_WARNING("load cache failed after %d retries (transfer error), stream: [%ld]",
+                                    load_cache_retry_count_,
+                                    stream_->streamId());
+                stream_->reportError(ErrorCode::LOAD_CACHE_TIMEOUT,
+                                     "load cache failed after " + std::to_string(MAX_LOAD_CACHE_RETRY)
+                                         + " retries (transfer error)");
+                releaseResource();
+                return true;
+            }
+            load_cache_retry_count_++;
+            asyncLoadCache();
+            return false;  // 失败重试
+        } else {
+            // 匹配失败：不重试，继续执行
+            return true;
+        }
     }
     load_cache_context_.reset();
     return true;
