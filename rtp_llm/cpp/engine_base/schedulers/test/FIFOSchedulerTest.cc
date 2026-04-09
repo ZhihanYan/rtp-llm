@@ -16,6 +16,7 @@ namespace rtp_llm {
 
 class FIFOSchedulerTest: public DeviceTestBase {
 public:
+    FIFOSchedulerTest() {}
 };
 
 TEST_F(FIFOSchedulerTest, testSimple) {
@@ -42,19 +43,28 @@ TEST_F(FIFOSchedulerTest, testSimple) {
     shared_ptr<GenerateStream> stream =
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    
+    // First schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_memory_cache)
+    // Stream stays in WAITING state with LoadInitiated event set
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    
+    // Second schedule: evaluateWaitingStreams sets CanRun event, then stream transitions to RUNNING
+    auto streams_status2 = scheduler.schedule();
+    ASSERT_TRUE(streams_status2.ok());
+    ASSERT_EQ(streams_status2.value().size(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
 
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
 
-    stream->setFinishedWithoutLock();
+    stream->reportEvent(StreamEvents::GenerateDone);
 
-    auto streams_status2 = scheduler.schedule();
-    ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(streams_status2.value().size(), 0);
+    auto streams_status4 = scheduler.schedule();
+    ASSERT_TRUE(streams_status4.ok());
+    ASSERT_EQ(streams_status4.value().size(), 0);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 3);
@@ -82,11 +92,9 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheLackMem) {
     query->generate_config               = make_shared<GenerateConfig>();
     shared_ptr<GenerateStream> stream =
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
-    ASSERT_TRUE(scheduler.enqueue(stream).ok());
-    auto streams_status = scheduler.schedule();
-    ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 0);
-    ASSERT_TRUE(stream->stopped());
+    // In the new code, checkInputLength rejects at enqueue time
+    ASSERT_FALSE(scheduler.enqueue(stream).ok());
+    ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "input len 3 is greater than kv cache max available tokens num 2");
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
@@ -116,18 +124,27 @@ TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     shared_ptr<GenerateStream> stream =
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
+    
+    // First schedule: stream calls initKVBlock and asyncLoadCache (returns false)
+    // Stream stays in WAITING with LoadInitiated event set
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 1);
-    ASSERT_FALSE(stream->stopped());
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    
+    // Second schedule: evaluateWaitingStreams sets CanRun, stream transitions to RUNNING
+    auto streams_status2 = scheduler.schedule();
+    ASSERT_TRUE(streams_status2.ok());
+    ASSERT_EQ(streams_status2.value().size(), 1);
+    ASSERT_FALSE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 0);
 
     stream->setSeqLength(stream->seqLength() + 1);
-    auto streams_status2 = scheduler.schedule();
-    ASSERT_TRUE(streams_status2.ok());
-    ASSERT_EQ(streams_status2.value().size(), 0);
-    ASSERT_TRUE(stream->stopped());
+    auto streams_status3 = scheduler.schedule();
+    ASSERT_TRUE(streams_status3.ok());
+    ASSERT_EQ(streams_status3.value().size(), 0);
+    ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "incrKVBlock failed: LACK MEM");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 2);
 }
@@ -175,7 +192,7 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
     ASSERT_EQ(streams_status.value().size(), 0);
-    ASSERT_TRUE(stream->stopped());
+    ASSERT_TRUE(stream->hasError());
     ASSERT_EQ(stream->stopReason(), "LACK MEM");
     ASSERT_EQ(cache_manager->freeBlocksNum(), 10);
     ASSERT_EQ(cache_manager->availableBlocksNum(), 10);
@@ -221,16 +238,25 @@ TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream).ok());
 
+    // First schedule: stream calls initKVBlock and asyncLoadCache (returns false)
+    // Stream stays in WAITING with LoadInitiated event set
     auto streams_status1 = scheduler.schedule();
     ASSERT_TRUE(streams_status1.ok());
-    ASSERT_EQ(streams_status1.value().size(), 1);
-    ASSERT_FALSE(stream->stopped());
+    ASSERT_EQ(streams_status1.value().size(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_FALSE(stream->hasError());
 
-    stream->setSeqLength(9);
+    // Second schedule: evaluateWaitingStreams sets CanRun, stream transitions to RUNNING
     auto streams_status2 = scheduler.schedule();
     ASSERT_TRUE(streams_status2.ok());
     ASSERT_EQ(streams_status2.value().size(), 1);
-    ASSERT_FALSE(stream->stopped());
+    ASSERT_FALSE(stream->hasError());
+    
+    stream->setSeqLength(9);
+    auto streams_status3 = scheduler.schedule();
+    ASSERT_TRUE(streams_status3.ok());
+    ASSERT_EQ(streams_status3.value().size(), 1);
+    ASSERT_FALSE(stream->hasError());
 }
 
 TEST_F(FIFOSchedulerTest, testReuseCache) {
@@ -260,14 +286,24 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
         make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream1).ok());
 
+    // First schedule: stream calls initKVBlock and asyncLoadCache (returns false without enable_memory_cache)
+    // Stream stays in WAITING with LoadInitiated event set
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    
+    // Second schedule: evaluateWaitingStreams sets CanRun, stream transitions to RUNNING
+    auto streams_status2 = scheduler.schedule();
+    ASSERT_TRUE(streams_status2.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
 
-    stream1->setFinishedWithoutLock();
-    auto streams_status2 = scheduler.schedule();
+    stream1->reportEvent(StreamEvents::GenerateDone);
+    auto streams_status3 = scheduler.schedule();
 
-    ASSERT_TRUE(streams_status2.ok());
+    ASSERT_TRUE(streams_status3.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 8);
@@ -279,13 +315,22 @@ TEST_F(FIFOSchedulerTest, testReuseCache) {
         make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
     ASSERT_TRUE(scheduler.enqueue(stream2).ok());
 
-    auto streams_status3 = scheduler.schedule();
-    ASSERT_TRUE(streams_status3.ok());
-    ASSERT_EQ(cache_manager->freeBlocksNum(), 6);
-
-    stream2->setFinishedWithoutLock();
+    // Third schedule for stream2: stays in WAITING
     auto streams_status4 = scheduler.schedule();
     ASSERT_TRUE(streams_status4.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    
+    // Fourth schedule for stream2: transitions to RUNNING
+    auto streams_status5 = scheduler.schedule();
+    ASSERT_TRUE(streams_status5.ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 6);
+
+    stream2->reportEvent(StreamEvents::GenerateDone);
+    auto streams_status6 = scheduler.schedule();
+    ASSERT_TRUE(streams_status6.ok());
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 7);
@@ -321,13 +366,22 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream1).ok());
 
+        // First schedule: stays in WAITING
         auto streams_status = scheduler.schedule();
         ASSERT_TRUE(streams_status.ok());
-
-        stream1->setFinishedWithoutLock();
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+        
+        // Second schedule: transitions to RUNNING
         auto streams_status2 = scheduler.schedule();
-
         ASSERT_TRUE(streams_status2.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+        stream1->reportEvent(StreamEvents::GenerateDone);
+        auto streams_status3 = scheduler.schedule();
+
+        ASSERT_TRUE(streams_status3.ok());
         ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
         ASSERT_EQ(scheduler.runningStreamsSize(), 0);
         ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
@@ -343,13 +397,22 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         ASSERT_TRUE(scheduler.enqueue(stream1).ok());
 
+        // First schedule: stays in WAITING
         auto streams_status = scheduler.schedule();
         ASSERT_TRUE(streams_status.ok());
-
-        stream1->setFinishedWithoutLock();
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+        
+        // Second schedule: transitions to RUNNING
         auto streams_status2 = scheduler.schedule();
-
         ASSERT_TRUE(streams_status2.ok());
+        ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+        ASSERT_EQ(scheduler.runningStreamsSize(), 1);
+
+        stream1->reportEvent(StreamEvents::GenerateDone);
+        auto streams_status3 = scheduler.schedule();
+
+        ASSERT_TRUE(streams_status3.ok());
         ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
         ASSERT_EQ(scheduler.runningStreamsSize(), 0);
         ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
@@ -365,13 +428,11 @@ TEST_F(FIFOSchedulerTest, testMaxContextBatchSize) {
         query2->generate_config->num_return_sequences = 20;
         shared_ptr<GenerateStream> stream2 =
             make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
-        ASSERT_TRUE(scheduler.enqueue(stream2).ok());
-
-        auto streams_status3 = scheduler.schedule();
-        ASSERT_TRUE(streams_status3.ok());
-        ASSERT_EQ(streams_status3.value().size(), 0);
-        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
+        // In the new code, checkInputLength rejects at enqueue time
+        ASSERT_FALSE(scheduler.enqueue(stream2).ok());
+        ASSERT_TRUE(stream2->hasError());
         ASSERT_EQ(stream2->stopReason(), "input len [7] * batch size [20] > max_batch_tokens_size [100]");
+        ASSERT_EQ(cache_manager->freeBlocksNum(), 20);
         ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
         ASSERT_EQ(scheduler.runningStreamsSize(), 0);
     }
@@ -412,10 +473,20 @@ TEST_F(FIFOSchedulerTest, testBatchEnqueue) {
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         streams.push_back(stream);
     }
-    ASSERT_TRUE(scheduler.batchEnqueue(streams).ok());
+    auto enqueued = scheduler.batchEnqueue(streams);
+    ASSERT_EQ(enqueued.size(), streams.size());
+    
+    // First schedule: both streams stay in WAITING with LoadInitiated event set
     auto streams_status = scheduler.schedule();
     ASSERT_TRUE(streams_status.ok());
-    ASSERT_EQ(streams_status.value().size(), 2);
+    ASSERT_EQ(streams_status.value().size(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+    ASSERT_EQ(scheduler.runningStreamsSize(), 0);
+    
+    // Second schedule: both streams transition to RUNNING
+    auto streams_status2 = scheduler.schedule();
+    ASSERT_TRUE(streams_status2.ok());
+    ASSERT_EQ(streams_status2.value().size(), 2);
     ASSERT_EQ(cache_manager->freeBlocksNum(), 1);
 
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);

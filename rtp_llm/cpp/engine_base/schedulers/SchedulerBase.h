@@ -16,8 +16,8 @@ class SchedulerBase {
 public:
     virtual ~SchedulerBase() {}
     virtual absl::Status enqueue(const GenerateStreamPtr& stream)                          = 0;
-    virtual absl::Status batchEnqueue(const std::vector<GenerateStreamPtr>& streams)       = 0;
-    virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule(size_t reserve_step = 0) = 0;
+    virtual std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) = 0;
+    virtual absl::StatusOr<std::list<GenerateStreamPtr>> schedule() = 0;
     virtual absl::Status                                 stop()                            = 0;
     virtual bool                                         empty()                           = 0;
     virtual int64_t                                      lastScheduleTime()                = 0;
