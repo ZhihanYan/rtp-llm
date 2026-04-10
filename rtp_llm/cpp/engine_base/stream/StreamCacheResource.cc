@@ -237,9 +237,6 @@ absl::Status StreamCacheResource::incrKVBlock(size_t reserve_step) {
         return absl::InternalError("fake inited not allow to incr block");
     }
 
-    if (resource_context_.role_type == RoleType::PREFILL) {
-        return absl::OkStatus();
-    }
     MallocInfo malloc_info;
     malloc_info.batch_kv_cache_resource = batch_kv_cache_resource_;
     malloc_info.complete_token_ids      = stream_->completeTokenIdsPtr();
@@ -548,11 +545,11 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
 }
 
 void StreamCacheResource::holdKVCacheForPDSep() {
-    auto& resource = batch_kv_cache_resource_->cacheResource(0);
+    auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
     const auto& cache_keys = resource.cacheKeys();
-    auto  ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
+    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
     if (ref) {
-        pd_kvcache_ref_ = std::move(ref);
+        pd_kvcache_ref_    = std::move(ref);
         pd_sep_cache_held_ = true;
     }
 }
