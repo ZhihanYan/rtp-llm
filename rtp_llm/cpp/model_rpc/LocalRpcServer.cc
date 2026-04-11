@@ -109,6 +109,9 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
+        if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
+            break;
+        }
         if (stream->queryPdSep()) {
             stream->waitForRemoteGenerate();
             break;

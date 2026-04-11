@@ -267,7 +267,7 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
         prefill_context.finished     = true;
         prefill_context.error_status = grpc::Status::OK;
     }
-    // Hold KV cache blocks BEFORE Decode starts loading to prevent premature release.
+    // Hold KV cache blocks AFTER allocte resource and BEFORE engin release to prevent premature release.
     // This protects blocks during the entire cache store transfer operation.
     if (prefill_context.generate_input->generate_config->pd_separation) {
         prefill_context.getStream()->holdKVCacheForPDSep();

@@ -123,14 +123,13 @@ void StreamCacheResource::releaseResource() {
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
         return;
     }
-    RTP_LLM_LOG_INFO("[PD_SEP_DEBUG] releaseResource: stream=%ld, pd_sep_cache_held=%d, curBlocksNum=%d, will_clearBlocks=%d",
-                     stream_->streamId(), pd_sep_cache_held_, curBlocksNum(), !pd_sep_cache_held_);
+    RTP_LLM_LOG_INFO(
+        "[PD_SEP_DEBUG] releaseResource: stream=%ld, curBlocksNum=%d, pd_kvcache_ref=%p",
+        stream_->streamId(),
+        curBlocksNum(),
+        pd_kvcache_ref_.get());
     tryReleaseKVBlock(curBlocksNum());
-    // PD separation mode: hold blocks until releaseKVCacheForPDSep() is called
-    // The blocks will be freed when pd_kvcache_ref_ is reset in releaseKVCacheForPDSep()
-    if (!pd_sep_cache_held_) {
-        batch_kv_cache_resource_->clearBlocks();
-    }
+    batch_kv_cache_resource_->clearBlocks();
     resource_released_ = true;
 }
 
@@ -154,8 +153,10 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         if (reuseCache() && !stream_->hasError() && stream_->getStatus() == StreamState::FINISHED) {
-            RTP_LLM_LOG_INFO("[PD_SEP_DEBUG] tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, pd_sep_cache_held=%d",
-                             stream_->streamId(), total_blocks, pd_sep_cache_held_);
+            RTP_LLM_LOG_INFO(
+                "[PD_SEP_DEBUG] tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d",
+                stream_->streamId(),
+                total_blocks);
             // save cache to gpu
             if (enableDeviceCache()) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
@@ -168,9 +169,12 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                 evictDeviceCacheToMemory();
             }
         } else {
-            RTP_LLM_LOG_INFO("[PD_SEP_DEBUG] tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
-                             stream_->streamId(), reuseCache(), stream_->hasError(),
-                             StreamStateToString(stream_->getStatus()).c_str());
+            RTP_LLM_LOG_INFO(
+                "[PD_SEP_DEBUG] tryReleaseKVBlock: stream=%ld, NOT storing cache, reuseCache=%d, hasError=%d, status=%s",
+                stream_->streamId(),
+                reuseCache(),
+                stream_->hasError(),
+                StreamStateToString(stream_->getStatus()).c_str());
         }
 
         FreeInfo free_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr()};
@@ -550,13 +554,11 @@ void StreamCacheResource::holdKVCacheForPDSep() {
     auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
     if (ref) {
         pd_kvcache_ref_    = std::move(ref);
-        pd_sep_cache_held_ = true;
     }
 }
 
 void StreamCacheResource::releaseKVCacheForPDSep() {
-    pd_sep_cache_held_ = false;
     pd_kvcache_ref_.reset();
-    batch_kv_cache_resource_->clearBlocks();
+    // batch_kv_cache_resource_->clearBlocks();  // TODO: 暂时注释，规避与 releaseResource/tryReleaseKVBlock 的竞态
 }
 }  // namespace rtp_llm

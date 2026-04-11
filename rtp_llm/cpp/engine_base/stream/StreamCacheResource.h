@@ -144,9 +144,6 @@ private:
 
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
-    // Flag to indicate PD separation mode where blocks should not be cleared
-    // until releaseKVCacheForPDSep() is called
-    bool pd_sep_cache_held_ = false;
 };
 
 }  // namespace rtp_llm
