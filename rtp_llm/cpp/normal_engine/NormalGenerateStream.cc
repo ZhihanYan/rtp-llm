@@ -193,7 +193,9 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
                       update_info.update_remote_generate);
 
     if (!finished_ && queryPdSep() && update_info.update_remote_generate) {
+        holdKVCacheForPDSep();
         reportEventWithoutLock(StreamEvents::NeedRemoteGenerate);
+        reportEventWithoutLock(StreamEvents::GenerateDone);
     }
 
     bool pd_sep_first_token = queryPdSep();

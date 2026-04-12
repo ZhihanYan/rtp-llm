@@ -559,6 +559,5 @@ void StreamCacheResource::holdKVCacheForPDSep() {
 
 void StreamCacheResource::releaseKVCacheForPDSep() {
     pd_kvcache_ref_.reset();
-    // batch_kv_cache_resource_->clearBlocks();  // TODO: 暂时注释，规避与 releaseResource/tryReleaseKVBlock 的竞态
 }
 }  // namespace rtp_llm

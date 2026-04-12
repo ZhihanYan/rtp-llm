@@ -258,21 +258,12 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
     }
     RTP_LLM_LOG_DEBUG("request [%ld] poll local output end", prefill_context.request_id);
 
-    if (prefill_context.getStream()->hasError()) {
+    auto stream = prefill_context.getStream();
+    if (stream->hasError()) {
         prefill_context.finished = true;
         prefill_context.error_status =
-            grpc::Status(grpc::StatusCode::INTERNAL, prefill_context.getStream()->statusInfo().ToString());
+            grpc::Status(grpc::StatusCode::INTERNAL, stream->statusInfo().ToString());
     }
-    if (prefill_context.getStream()->getStatus() == StreamState::FINISHED) {
-        prefill_context.finished     = true;
-        prefill_context.error_status = grpc::Status::OK;
-    }
-    // Hold KV cache blocks AFTER allocte resource and BEFORE engin release to prevent premature release.
-    // This protects blocks during the entire cache store transfer operation.
-    if (prefill_context.generate_input->generate_config->pd_separation) {
-        prefill_context.getStream()->holdKVCacheForPDSep();
-    }
-    prefill_context.getStream()->reportEvent(StreamEvents::GenerateDone);
 }
 
 void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_context) {
