@@ -542,6 +542,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
 
+    // First schedule: streams stay in WAITING with LoadInitiated event set (group incomplete)
     auto result1 = scheduler.schedule();
     ASSERT_TRUE(result1.ok());
     ASSERT_EQ(result1.value().size(), 0);
@@ -562,9 +563,16 @@ TEST_F(FIFOSchedulerTest, testForceBatchGroupComplete) {
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
 
+    // Second schedule: set CanRun event, initKVBlock and LoadInitiated for all 3 streams
     auto result2 = scheduler.schedule();
     ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 3);
+    ASSERT_EQ(result2.value().size(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 3);
+
+    // Third schedule: all 3 streams transition to RUNNING
+    auto result3 = scheduler.schedule();
+    ASSERT_TRUE(result3.ok());
+    ASSERT_EQ(result3.value().size(), 3);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 3);
 }
@@ -620,10 +628,16 @@ TEST_F(FIFOSchedulerTest, testForceBatchTimeout) {
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
 
-    // Group incomplete but timeout expired — streams should be scheduled as normal
-    auto result = scheduler.schedule();
-    ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 2);
+    // First schedule: streams stay in WAITING with LoadInitiated event set
+    auto result1 = scheduler.schedule();
+    ASSERT_TRUE(result1.ok());
+    ASSERT_EQ(result1.value().size(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
+
+    // Second schedule: timeout expired, streams transition to RUNNING
+    auto result2 = scheduler.schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
@@ -686,19 +700,26 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
 
-    // Round 1: normal stream is first in FIFO, force batch streams should be skipped
+    // Round 1: all streams stay in WAITING with LoadInitiated
     auto result1 = scheduler.schedule();
     ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(result1.value().size(), 1);
+    ASSERT_EQ(result1.value().size(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 3);
+
+    // Round 2: normal stream transitions to RUNNING (force batch streams skipped due to batch isolation)
+    auto result2 = scheduler.schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
 
     // Finish the normal stream
     normal_stream->reportEventWithoutLock(StreamEvents::GenerateDone);
-    // Round 2: force batch group should now be scheduled
-    auto result2 = scheduler.schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 2);
+
+    // Round 3: force batch group already has LoadInitiated, transitions directly to RUNNING
+    auto result3 = scheduler.schedule();
+    ASSERT_TRUE(result3.ok());
+    ASSERT_EQ(result3.value().size(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
 }
@@ -754,10 +775,16 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
         ASSERT_TRUE(scheduler.enqueue(stream).ok());
     }
 
-    // Round 1: group A first in FIFO, locks batch — group B skipped
+    // Round 1: all streams stay in WAITING with LoadInitiated
     auto result1 = scheduler.schedule();
     ASSERT_TRUE(result1.ok());
-    ASSERT_EQ(result1.value().size(), 2);
+    ASSERT_EQ(result1.value().size(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 4);
+
+    // Round 2: group A transitions to RUNNING (group B skipped due to batch isolation)
+    auto result2 = scheduler.schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 2);
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
 
@@ -766,10 +793,10 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
         s->reportEventWithoutLock(StreamEvents::GenerateDone);
     }
 
-    // Round 2: group B should now be scheduled
-    auto result2 = scheduler.schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 2);
+    // Round 3: group B already has LoadInitiated, transitions directly to RUNNING
+    auto result3 = scheduler.schedule();
+    ASSERT_TRUE(result3.ok());
+    ASSERT_EQ(result3.value().size(), 2);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler.runningStreamsSize(), 2);
 }

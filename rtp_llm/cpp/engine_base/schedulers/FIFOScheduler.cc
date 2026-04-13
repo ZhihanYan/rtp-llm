@@ -180,12 +180,81 @@ void FIFOScheduler::evaluateAndUpdateStreams(list<GenerateStreamPtr>& streams) {
 void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_streams) {
     RTP_LLM_PROFILE_FUNCTION();
     list<GenerateStreamPtr> new_streams;
+
+    // Batch group scheduling support:
+    // 1. Group completeness: force_batch streams with same batch_group_id are scheduled together
+    //    only when group size reaches batch_group_size
+    // 2. Timeout fallback: if batch_group_timeout expires, incomplete group is scheduled as normal
+    // 3. Batch isolation: each scheduling round handles only one type:
+    //    - normal streams, OR
+    //    - streams from a single force_batch group
+
+    struct GroupInfo {
+        int64_t first_arrival_time = 0;
+        int     count              = 0;
+    };
+    std::unordered_map<int64_t, GroupInfo> request_group_info;
+
+    int64_t now = autil::TimeUtility::currentTimeInMilliSeconds();
+
+    // Build group info statistics for force_batch streams
+    for (const auto& stream : waiting_streams) {
+        if (stream->forceBatch() && stream->batchGroupId() != -1) {
+            auto& info = request_group_info[stream->batchGroupId()];
+            if (info.count == 0) {
+                info.first_arrival_time = stream->enqueueTime() / 1000;
+            }
+            info.count++;
+        }
+    }
+
+    int64_t force_batch_group_id = -1;
+
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
-        // 先检查是否有错误，避免错误请求占用资源. 已经有 CanRun 事件的 stream 也不再检查
-        if (!(*it)->hasError() && !(*it)->hasEvent(StreamEvents::CanRun)
-            && evaluateRunningMemory(new_streams, *it)) {
-            (*it)->reportEvent(StreamEvents::CanRun);
-            new_streams.push_back(*it);
+        auto& stream = *it;
+        bool force_batch = stream->forceBatch();
+
+        // Check if this stream can be scheduled based on batch group rules
+        if (force_batch && stream->batchGroupId() != -1) {
+            auto& info = request_group_info[stream->batchGroupId()];
+            // Check timeout: if expired, treat as normal stream
+            if (now - info.first_arrival_time > stream->batchGroupTimeout()) {
+                force_batch = false;
+            } else if (info.count < stream->batchGroupSize()) {
+                // Group incomplete, skip this stream
+                it++;
+                continue;
+            }
+        }
+
+        // Batch isolation: force_batch streams and normal streams cannot mix in the same round.
+        // The first stream that passes checks determines the batch type for this round.
+        if (!new_streams.empty()) {
+            if (force_batch_group_id != -1) {
+                // Already in force_batch mode, only accept same group
+                if (!force_batch || stream->batchGroupId() != force_batch_group_id) {
+                    it++;
+                    continue;
+                }
+            } else {
+                // Already in normal mode, skip force_batch streams
+                if (force_batch) {
+                    it++;
+                    continue;
+                }
+            }
+        }
+
+        // Check for errors and memory constraints
+        if (!stream->hasError() && !stream->hasEvent(StreamEvents::CanRun)
+            && evaluateRunningMemory(new_streams, stream)) {
+            stream->reportEvent(StreamEvents::CanRun);
+            new_streams.push_back(stream);
+
+            // Lock batch type based on first scheduled stream
+            if (new_streams.size() == 1 && force_batch && stream->batchGroupId() != -1) {
+                force_batch_group_id = stream->batchGroupId();
+            }
         }
         it++;
     }
@@ -219,6 +288,8 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
         cond_.wait(lock, [this] { return waitPredicate(); });
     }
 
+    schedule_trigger_ = false;
+
     // LOADING_CACHE -> DONE/WAITING: error / load cache done
     evaluateAndUpdateStreams(loading_cache_streams_);
     // RUNNING -> DONE: error / finished
@@ -234,8 +305,14 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     //   Phase 2 (evaluateAndUpdateStreams): Actually moves streams from waiting_streams_ to
     //       their new state (RUNNING or LOADING_CACHE) based on the events set in Phase 1.
     // This separation ensures safe iteration while deferring structural modifications.
+    size_t prev_waiting_size = waiting_streams_.size();
     evaluateWaitingStreams(waiting_streams_);
     evaluateAndUpdateStreams(waiting_streams_);
+
+    // If streams were scheduled, trigger next scheduling round
+    if (waiting_streams_.size() < prev_waiting_size) {
+        schedule_trigger_ = true;
+    }
 
     reportMetrics();
     last_schedule_time_ = autil::TimeUtility::currentTimeInMilliSeconds();
