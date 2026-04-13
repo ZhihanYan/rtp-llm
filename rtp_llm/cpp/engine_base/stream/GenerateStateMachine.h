@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -38,7 +39,7 @@ public:
     StreamState moveToNext();
 
     StreamState getStatus() const {
-        return status;
+        return status.load(std::memory_order_acquire);
     }
 
     void setReserveStep(size_t reserve_step) {
@@ -46,8 +47,9 @@ public:
     }
 
     // 公开的状态和错误信息，GenerateStream 等外部代码直接访问
-    StreamState status = StreamState::WAITING;
-    ErrorInfo   error_info;
+    // status 使用 atomic 保证线程安全：moveToNext() 在 mutex_ 下写入，getStatus() 无锁读取
+    std::atomic<StreamState> status = StreamState::WAITING;
+    ErrorInfo                error_info;
 
 private:
     void handleWaiting();
