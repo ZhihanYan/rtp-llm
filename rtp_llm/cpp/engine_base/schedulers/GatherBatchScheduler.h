@@ -45,18 +45,46 @@ public:
         RTP_LLM_LOG_INFO("GatherBatchScheduler update batch size to %d", gather_batch_size_);
     }
 
-protected:
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
-        if ((int)waiting_streams_.size() >= gather_batch_size_) {
-            RTP_LLM_LOG_INFO(
-                "GatherBatchScheduler schedule, waiting_streams_.size() [%d] >= gather_batch_size_ [%d], start run",
-                waiting_streams_.size(),
-                gather_batch_size_);
-            waiting_streams_.sort(
-                [](const GenerateStreamPtr& a, const GenerateStreamPtr& b) { return a->streamId() < b->streamId(); });
-            gather_batch_size_ = 1;
-            return FIFOScheduler::schedule();
+        std::unique_lock<std::mutex> lock(lock_);
+        cond_.wait_for(lock, std::chrono::seconds(30), [this] {
+            return waiting_streams_.size() >= static_cast<size_t>(gather_batch_size_) || running_streams_.size() > 0
+                   || !loading_cache_streams_.empty();
+        });
+
+        // LOADING_CACHE -> DONE/WAITING: error / load cache done
+        evaluateAndUpdateStreams(loading_cache_streams_);
+        // RUNNING -> DONE: error / finished
+        evaluateAndUpdateStreams(running_streams_);
+
+        if (waiting_streams_.size() >= static_cast<size_t>(gather_batch_size_)) {
+            // Gather exactly gather_batch_size_ streams
+            std::list<GenerateStreamPtr> new_streams;
+            for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
+                if (!(*it)->hasError() && !(*it)->hasEvent(StreamEvents::CanRun)) {
+                    new_streams.push_back(*it);
+                }
+                if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
+                    break;
+                }
+            }
+            // Only schedule when we have enough streams
+            if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
+                for (auto& stream : new_streams) {
+                    stream->reportEvent(StreamEvents::CanRun);
+                    while (stream->moveToNext() != StreamState::RUNNING) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                }
+                running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
+                // Remove scheduled streams from waiting_streams_
+                for (auto& stream : new_streams) {
+                    waiting_streams_.remove(stream);
+                }
+                RTP_LLM_LOG_INFO("GatherBatchScheduler::schedule: gathered %zu streams, start run", new_streams.size());
+            }
         }
+
         return running_streams_;
     }
 

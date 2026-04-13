@@ -694,7 +694,7 @@ TEST_F(FIFOSchedulerTest, testForceBatchIsolation) {
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
 
     // Finish the normal stream
-    normal_stream->setFinishedWithoutLock();
+    normal_stream->reportEventWithoutLock(StreamEvents::GenerateDone);
     // Round 2: force batch group should now be scheduled
     auto result2 = scheduler.schedule();
     ASSERT_TRUE(result2.ok());
@@ -763,7 +763,7 @@ TEST_F(FIFOSchedulerTest, testTwoForceBatchGroupsIsolation) {
 
     // Finish group A
     for (auto& s : group_a_streams) {
-        s->setFinishedWithoutLock();
+        s->reportEventWithoutLock(StreamEvents::GenerateDone);
     }
 
     // Round 2: group B should now be scheduled

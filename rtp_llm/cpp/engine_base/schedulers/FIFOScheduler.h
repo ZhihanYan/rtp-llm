@@ -56,9 +56,11 @@ private:
     bool waitPredicate();
     void addStreamToNewState(const GenerateStreamPtr& stream, StreamState new_state);
     void evaluateWaitingStreams(std::list<GenerateStreamPtr>& streams);
-    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
     void cancelStreams(std::list<GenerateStreamPtr>& streams);
     bool checkInputLength(const GenerateStreamPtr& stream);
+
+protected:
+    void evaluateAndUpdateStreams(std::list<GenerateStreamPtr>& streams);
 
 protected:
     PDSepConfig                     pd_sep_config_;
