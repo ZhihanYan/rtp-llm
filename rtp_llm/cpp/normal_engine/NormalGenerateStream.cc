@@ -91,7 +91,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             }
         }
 
-        generate_output.finished = sub_generate_status_[i] == StreamState::FINISHED;
+        generate_output.finished = isSubGenerateDoneWithoutLock(i);
         if (generate_input_->generate_config->aux_info) {
             generate_output.aux_info.iter_count   = iter_count_;
             generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
@@ -176,6 +176,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     finished_ = needFinish();
     if (finished_) {
         reportEventWithoutLock(StreamEvents::GenerateDone);
+        fillSubGenerateStatus(StreamState::FINISHED);
     }
     if (update_info.cum_log_probs.defined()) {
         cum_log_probs_ = update_info.cum_log_probs.cpu();

@@ -520,7 +520,7 @@ bool GenerateStream::hasError() const {
 }
 
 bool GenerateStream::isSubGenerateDoneWithoutLock(int batch_id) const {
-    return sub_generate_status_[batch_id] == StreamState::FINISHED;
+    return getStatus() == StreamState::FINISHED || sub_generate_status_[batch_id] == StreamState::FINISHED;
 }
 
 ErrorInfo GenerateStream::statusInfo() {
