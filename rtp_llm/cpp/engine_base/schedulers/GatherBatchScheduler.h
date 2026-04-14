@@ -83,6 +83,7 @@ public:
                 }
                 RTP_LLM_LOG_INFO("GatherBatchScheduler::schedule: gathered %zu streams, start run", new_streams.size());
             }
+            gather_batch_size_ = 1;
         }
 
         return running_streams_;
