@@ -116,19 +116,12 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testScheduleNew_NoReuseCache_DirectlyRunning
     auto stream    = createStream({1, 2, 3}, /*reuse_cache=*/false);
 
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
-    
-    // First schedule: stream stays in WAITING with LoadInitiated event set
+
+    // Single schedule: stream transitions directly to RUNNING (no cache loading needed)
     auto result = scheduler->schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 0);
+    ASSERT_EQ(result.value().size(), 1);
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 0);
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
-    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
-    
-    // Second schedule: stream transitions to RUNNING
-    auto result2 = scheduler->schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 1);
     ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
 }
@@ -348,26 +341,21 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testEvictDoneStreams_HandlesExternalError) {
     auto stream    = createStream({1, 2, 3});
 
     ASSERT_TRUE(scheduler->enqueue(stream).ok());
-    
-    // First schedule: stream stays in WAITING
+
+    // Single schedule: stream transitions directly to RUNNING (no cache loading needed)
     auto result = scheduler->schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 0);
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
-    
-    // Second schedule: stream transitions to RUNNING
-    auto result2 = scheduler->schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 1);
+    ASSERT_EQ(result.value().size(), 1);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
 
     // Simulate external error
     stream->reportError(ErrorCode::CANCELLED, "cancelled by RPC");
 
     // Next schedule: evictDoneStreams should detect the error, finish the stream, and release resources
-    auto result3 = scheduler->schedule();
-    ASSERT_TRUE(result3.ok());
-    ASSERT_EQ(result3.value().size(), 0);
+    auto result2 = scheduler->schedule();
+    ASSERT_TRUE(result2.ok());
+    ASSERT_EQ(result2.value().size(), 0);
     ASSERT_TRUE(stream->isFinished());
     ASSERT_EQ(scheduler->runningStreamsSize(), 0);
 }
@@ -392,19 +380,13 @@ TEST_F(FIFOSchedulerAsyncCacheTest, testMixedAsyncAndDirectStreams) {
     ASSERT_TRUE(scheduler->enqueue(stream1).ok());
     ASSERT_TRUE(scheduler->enqueue(stream2).ok());
 
-    // First schedule: stream1 -> LOADING_CACHE (async load), stream2 -> WAITING
+    // Single schedule: stream1 -> LOADING_CACHE (async load), stream2 -> RUNNING (directly)
     auto result = scheduler->schedule();
     ASSERT_TRUE(result.ok());
-    ASSERT_EQ(result.value().size(), 0);
+    ASSERT_EQ(result.value().size(), 1);  // Only stream2 is running
     ASSERT_TRUE(stream1->getStatus() == StreamState::LOADING_CACHE);
     ASSERT_EQ(scheduler->loading_cache_streams_.size(), 1);
-    ASSERT_EQ(scheduler->waitingStreamsSize(), 1);
-    ASSERT_EQ(scheduler->runningStreamsSize(), 0);
-    
-    // Second schedule: stream1 still loading, stream2 -> RUNNING
-    auto result2 = scheduler->schedule();
-    ASSERT_TRUE(result2.ok());
-    ASSERT_EQ(result2.value().size(), 1);
+    ASSERT_EQ(scheduler->waitingStreamsSize(), 0);
     ASSERT_EQ(scheduler->runningStreamsSize(), 1);
 }
 

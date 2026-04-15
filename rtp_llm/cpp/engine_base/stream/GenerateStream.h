@@ -213,15 +213,14 @@ public:
     int64_t getTimeoutMs() const;
     void    checkTimeout();
 
-    void         reportEvent(StreamEvents::EventType event,
-                             ErrorCode               error_code = ErrorCode::NONE_ERROR,
-                             const std::string&      error_msg  = "");
-    void         reportEventWithoutLock(StreamEvents::EventType event,
-                                        ErrorCode               error_code = ErrorCode::NONE_ERROR,
-                                        const std::string&      error_msg  = "");
+    void reportEvent(StreamEvents::EventType event,
+                     ErrorCode               error_code = ErrorCode::NONE_ERROR,
+                     const std::string&      error_msg  = "");
+    void reportEventWithoutLock(StreamEvents::EventType event,
+                                ErrorCode               error_code = ErrorCode::NONE_ERROR,
+                                const std::string&      error_msg  = "");
 
-    void         reportError(ErrorCode               error_code = ErrorCode::NONE_ERROR,
-                             const std::string&      error_msg  = "");
+    void         reportError(ErrorCode error_code = ErrorCode::NONE_ERROR, const std::string& error_msg = "");
     bool         hasEvent(StreamEvents::EventType event) const;
     virtual bool hasError() const;
     ErrorInfo    statusInfo();
@@ -232,7 +231,7 @@ public:
 
     virtual StreamState getStatus() const;
     bool                isFinished() const;  // Returns true if stream is active (no error and not finished)
-    bool                isActive() const;  // Returns true if stream is active (no error and not finished)
+    bool                isActive() const;    // Returns true if stream is active (no error and not finished)
     bool                isSubGenerateDoneWithoutLock(int batch_id) const;
 
     size_t iterCount() const;
@@ -541,8 +540,8 @@ protected:
     int32_t batch_with_prefill_times_ = 0;
     int32_t batch_with_prefill_len_   = 0;
 
-    kmonitor::MetricsReporterPtr             metrics_reporter_;
-    rtp_llm::SpecialTokens                   special_tokens_;
+    kmonitor::MetricsReporterPtr metrics_reporter_;
+    rtp_llm::SpecialTokens       special_tokens_;
 
     // Shared ownership diamond:
     //   GenerateStream owns both stream_cache_resource_ and generate_status_ (GenerateStateMachine).

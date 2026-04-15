@@ -81,7 +81,8 @@ public:
             case StreamState::FINISHED:
                 break;
             default:
-                RTP_LLM_LOG_ERROR("Unknown state: %d for stream [%ld]", static_cast<int>(new_state), stream->streamId());
+                RTP_LLM_LOG_ERROR(
+                    "Unknown state: %d for stream [%ld]", static_cast<int>(new_state), stream->streamId());
                 break;
         }
     }
@@ -101,10 +102,13 @@ public:
     }
 
     void evaluateWaitingStreams() {
+        // 清理 waiting_streams_ 中有错误的 stream
+        waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
+
         std::list<GenerateStreamPtr> new_streams;
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
             // 先检查是否有错误，避免错误请求占用资源
-            if (!(*it)->hasError() && (*it)->hasEvent(StreamEvents::CanRun)) {
+            if (!(*it)->hasError()) {
                 new_streams.push_back(*it);
             }
             if (new_streams.size() >= batch_size_) {
@@ -115,8 +119,13 @@ public:
         if (new_streams.size() >= batch_size_) {
             for (auto& stream : new_streams) {
                 stream->reportEvent(StreamEvents::CanRun);
-                stream->moveToNext();
+                // 忙等stream load cache done, 和原有SyncLoadCache逻辑等效
+                while (stream->getStatus() != StreamState::FINISHED && stream->moveToNext() != StreamState::RUNNING) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                }
             }
+            // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
+            new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
             running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
             // 从waiting_streams_中移除已调度的stream
             for (auto& stream : new_streams) {
@@ -146,13 +155,14 @@ public:
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0 || !loading_cache_streams_.empty();
+            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+                   || !loading_cache_streams_.empty();
         });
 
         // 统一通过状态机驱动各队列中 stream 的状态转移
         // LOADING_CACHE -> DONE/WAITING: error / load cache done
         evaluateAndUpdateStreams(loading_cache_streams_);
-        evaluateAndUpdateStreams(running_streams_); 
+        evaluateAndUpdateStreams(running_streams_);
 
         if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
             evaluateWaitingStreams();

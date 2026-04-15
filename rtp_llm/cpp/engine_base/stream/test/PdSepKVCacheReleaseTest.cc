@@ -52,13 +52,13 @@ protected:
         initial_free_blocks_ = cache_manager_->freeBlocksNum();
 
         ResourceContext resource_context;
-        resource_context.cache_manager        = cache_manager_;
-        resource_context.reuse_cache          = true;
-        resource_context.enable_device_cache  = true;
-        resource_context.role_type            = RoleType::PREFILL;
+        resource_context.cache_manager       = cache_manager_;
+        resource_context.reuse_cache         = true;
+        resource_context.enable_device_cache = true;
+        resource_context.role_type           = RoleType::PREFILL;
 
-        auto generate_input  = std::make_shared<GenerateInput>();
-        auto generate_config = std::make_shared<GenerateConfig>();
+        auto generate_input                   = std::make_shared<GenerateInput>();
+        auto generate_config                  = std::make_shared<GenerateConfig>();
         generate_config->num_return_sequences = 1;
         generate_config->reuse_cache          = true;
         generate_config->enable_device_cache  = true;
@@ -85,10 +85,10 @@ protected:
     }
 
 protected:
-    autil::EnvGuard                 perf_scope;
+    autil::EnvGuard                       perf_scope;
     std::shared_ptr<NormalGenerateStream> stream_;
-    std::shared_ptr<KVCacheManager> cache_manager_;
-    size_t                          initial_free_blocks_ = 0;
+    std::shared_ptr<KVCacheManager>       cache_manager_;
+    size_t                                initial_free_blocks_ = 0;
 };
 
 // =============================================================================
@@ -100,7 +100,7 @@ TEST_F(PdSepKVCacheReleaseTest, testNormalRelease_BlocksReturnedToPool) {
     prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
     allocateAndFinish();
 
-    auto& resource = stream_->streamCacheResource();
+    auto& resource  = stream_->streamCacheResource();
     int   allocated = resource.curBlocksNum();
     ASSERT_GT(allocated, 0) << "Should have allocated some blocks";
     ASSERT_LT(cache_manager_->freeBlocksNum(), initial_free_blocks_) << "Blocks should be in use";
@@ -144,7 +144,7 @@ TEST_F(PdSepKVCacheReleaseTest, testReleaseResource_WithHold_ClearsBlocks) {
     prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
     allocateAndFinish();
 
-    auto& resource = stream_->streamCacheResource();
+    auto& resource  = stream_->streamCacheResource();
     int   allocated = resource.curBlocksNum();
     ASSERT_GT(allocated, 0);
 
@@ -225,13 +225,12 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
     resource_context2.enable_device_cache = true;
     resource_context2.role_type           = RoleType::PREFILL;
 
-    auto generate_input2  = std::make_shared<GenerateInput>();
-    auto generate_config2 = std::make_shared<GenerateConfig>();
+    auto generate_input2                   = std::make_shared<GenerateInput>();
+    auto generate_config2                  = std::make_shared<GenerateConfig>();
     generate_config2->num_return_sequences = 1;
     generate_config2->reuse_cache          = true;
     generate_config2->enable_device_cache  = true;
-    generate_input2->input_ids =
-        torch::tensor(std::vector<int32_t>(tokens.begin(), tokens.end()), torch::kInt32);
+    generate_input2->input_ids       = torch::tensor(std::vector<int32_t>(tokens.begin(), tokens.end()), torch::kInt32);
     generate_input2->generate_config = generate_config2;
 
     ModelConfig model_config;
@@ -249,7 +248,7 @@ TEST_F(PdSepKVCacheReleaseTest, testInsertIntoCache_CalledDuringRelease_ReuseWor
     // With 14 tokens and block_size=8: 1 full block (8 tokens) should be reused
     int reuse_len = stream2->reuseLength();
     EXPECT_GE(reuse_len, 8) << "At least 1 block (8 tokens) should be reused from device cache. "
-                              << "reuse_len=" << reuse_len;
+                            << "reuse_len=" << reuse_len;
 
     stream2->releaseResource();
 }

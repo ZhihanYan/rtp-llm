@@ -20,7 +20,6 @@ using namespace std;
 
 namespace rtp_llm {
 
-
 GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
                                const ModelConfig&               model_config,
                                const RuntimeConfig&             runtime_config,
@@ -475,7 +474,6 @@ void GenerateStream::reportEventWithoutLock(StreamEvents::EventType event,
     generate_status_->reportEvent(event, error_code, error_msg);
 }
 
-
 void GenerateStream::reportError(ErrorCode error_code, const std::string& error_msg) {
     std::lock_guard<std::mutex> lock(*mutex_);
     generate_status_->reportEvent(StreamEvents::Error, error_code, error_msg);
@@ -618,7 +616,7 @@ void GenerateStream::matchEosToken(int batch_id) {
 
 bool GenerateStream::waitForRemoteGenerate() {
     std::unique_lock<std::mutex> lock(*mutex_);
-    // Wait until stream status -> FINISHED
+    // Wait until stream status -> NeedRemoteGenerate
     cv_->wait(lock, [this] { return generate_status_->hasEvent(StreamEvents::NeedRemoteGenerate); });
     // If stream status is abnormal, log the error info
     if (hasError()) {

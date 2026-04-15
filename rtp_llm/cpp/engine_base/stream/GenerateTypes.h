@@ -58,7 +58,7 @@ public:
 
     // Batch grouping params
     int     batch_group_size = 1;
-    int64_t batch_group_id = -1;  // Batch group ID for force batch grouping, -1 means not set
+    int64_t batch_group_id   = -1;  // Batch group ID for force batch grouping, -1 means not set
 };
 
 struct AuxInfo {
@@ -136,12 +136,12 @@ inline std::string StreamStateToString(StreamState state) {
 class StreamEvents {
 public:
     enum EventType : uint32_t {
-        None                = 0,
-        LoadInitiated       = 1 << 0,  // 已尝试加载缓存
-        CanRun              = 1 << 1,  // 调度器允许运行
-        GenerateDone        = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
-        Error               = 1 << 3,  // 出错，任何状态 -> FINISHED
-        NeedRemoteGenerate  = 1 << 4,  // 需要远程生成
+        None               = 0,
+        LoadInitiated      = 1 << 0,  // 已尝试加载缓存
+        CanRun             = 1 << 1,  // 调度器允许运行
+        GenerateDone       = 1 << 2,  // 本地生成完成（RUNNING -> FINISHED）
+        Error              = 1 << 3,  // 出错，任何状态 -> FINISHED
+        NeedRemoteGenerate = 1 << 4,  // 需要远程生成
     };
 
     void append(EventType event) {

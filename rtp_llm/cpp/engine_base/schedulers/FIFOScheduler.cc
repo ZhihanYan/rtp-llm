@@ -74,8 +74,8 @@ bool FIFOScheduler::checkInputLength(const GenerateStreamPtr& stream) {
     if (stream->inputLength() > cache_manager_->maxAvailableTokensNum()) {
         stream->reportError(ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN,
                             autil::StringUtil::formatString("input len " + std::to_string(stream->inputLength())
-                                + " is greater than kv cache max available tokens num "
-                                + std::to_string(cache_manager_->maxAvailableTokensNum())));
+                                                            + " is greater than kv cache max available tokens num "
+                                                            + std::to_string(cache_manager_->maxAvailableTokensNum())));
         return false;  // Input length exceeds max available tokens
     } else if ((size_t)stream->inputLength() * stream->currentBatchSize() > max_batch_tokens_size_) {
         auto error_info =
@@ -113,7 +113,7 @@ std::vector<std::shared_ptr<GenerateStream>> FIFOScheduler::batchEnqueue(const v
     }
     {
         std::lock_guard<std::mutex> lock(lock_);
-        waiting_streams_.insert(waiting_streams_.end(), streams.begin(), streams.end());
+        waiting_streams_.insert(waiting_streams_.end(), stream_enqueued.begin(), stream_enqueued.end());
         schedule_trigger_ = true;
     }
     cond_.notify_all();
@@ -159,7 +159,8 @@ void FIFOScheduler::accountBatchMetrics(const GenerateStreamPtr& new_stream) {
 
 bool FIFOScheduler::waitPredicate() {
     // Check streams directly without calling empty() which acquires lock_ (already held by schedule())
-    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty() || !running_streams_.empty();
+    return stop_ || schedule_trigger_ || !waiting_streams_.empty() || !loading_cache_streams_.empty()
+           || !running_streams_.empty();
 }
 
 // 通过 GenerateStateMachine 驱动每个 stream 的状态转移，状态变化的 stream 移入对应队列
@@ -211,8 +212,8 @@ void FIFOScheduler::evaluateWaitingStreams(list<GenerateStreamPtr>& waiting_stre
     int64_t force_batch_group_id = -1;
 
     for (auto it = waiting_streams.begin(); it != waiting_streams.end();) {
-        auto& stream = *it;
-        bool force_batch = stream->forceBatch();
+        auto& stream      = *it;
+        bool  force_batch = stream->forceBatch();
 
         // Check if this stream can be scheduled based on batch group rules
         if (force_batch && stream->batchGroupId() != -1) {
@@ -270,7 +271,7 @@ void FIFOScheduler::addStreamToNewState(const GenerateStreamPtr& stream, StreamS
             break;
         case StreamState::RUNNING:
             accountBatchMetrics(stream);
-            running_streams_.push_back(stream);
+            new_streams_.push_back(stream);
             break;
         case StreamState::FINISHED:
             break;
@@ -308,6 +309,8 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     size_t prev_waiting_size = waiting_streams_.size();
     evaluateWaitingStreams(waiting_streams_);
     evaluateAndUpdateStreams(waiting_streams_);
+    running_streams_.insert(running_streams_.end(), new_streams_.begin(), new_streams_.end());
+    new_streams_.clear();
 
     // If streams were scheduled, trigger next scheduling round
     if (waiting_streams_.size() < prev_waiting_size) {

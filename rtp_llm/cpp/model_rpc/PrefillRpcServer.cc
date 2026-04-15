@@ -260,9 +260,8 @@ void PrefillRpcServer::pollLocalOutput(PrefillGenerateContext& prefill_context) 
 
     auto stream = prefill_context.getStream();
     if (stream->hasError()) {
-        prefill_context.finished = true;
-        prefill_context.error_status =
-            grpc::Status(grpc::StatusCode::INTERNAL, stream->statusInfo().ToString());
+        prefill_context.finished     = true;
+        prefill_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, stream->statusInfo().ToString());
     }
 }
 
@@ -274,7 +273,7 @@ void PrefillRpcServer::remoteLoadCacheEnd(PrefillGenerateContext& prefill_contex
     auto error_code = transRPCErrorCode(load_response.error_info().error_code());
     CLIENT_GRPC_RET_IF_ERROR(prefill_context, error_code == ErrorCode::NONE_ERROR, error_code);
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache done", prefill_context.request_id);
-    
+
     // Decode has finished loading cache, now safe to release KV cache blocks.
     // This is called after cache store transfer is complete.
     if (prefill_context.generate_input->generate_config->pd_separation) {

@@ -72,18 +72,25 @@ public:
             if (new_streams.size() >= static_cast<size_t>(gather_batch_size_)) {
                 for (auto& stream : new_streams) {
                     stream->reportEvent(StreamEvents::CanRun);
-                    while (stream->moveToNext() != StreamState::RUNNING) {
+                    // busy wait for loading cache done, equivalent to to original logic.
+                    while (stream->getStatus() != StreamState::FINISHED
+                           && stream->moveToNext() != StreamState::RUNNING) {
                         std::this_thread::sleep_for(std::chrono::milliseconds(1));
                     }
                 }
+                // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
+                new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
+                // 按 streamId 排序以保证 CI 确定性结果
+                new_streams.sort([](const GenerateStreamPtr& a, const GenerateStreamPtr& b) {
+                    return a->streamId() < b->streamId();
+                });
                 running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
                 // Remove scheduled streams from waiting_streams_
                 for (auto& stream : new_streams) {
                     waiting_streams_.remove(stream);
                 }
-                RTP_LLM_LOG_INFO("GatherBatchScheduler::schedule: gathered %zu streams, start run", new_streams.size());
+                gather_batch_size_ = 1;
             }
-            gather_batch_size_ = 1;
         }
 
         return running_streams_;

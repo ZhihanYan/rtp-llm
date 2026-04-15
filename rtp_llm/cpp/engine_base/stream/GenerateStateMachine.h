@@ -16,12 +16,15 @@ class StreamCacheResource;  // forward declaration
 // 状态转移路径: WAITING -> LOADING_CACHE -> WAITING -> RUNNING -> FINISHED
 // 每次调度轮调用 moveToNext() 驱动状态转移，由 FIFOScheduler::evaluateAndUpdateStreams 统一调用。
 // 外部通过 reportEvent() 投递事件（替代原先分散的 reportXX 接口），moveToNext() 消费累积事件后决策转移。
+// 线程安全说明：GenerateStateMachine 本身不提供同步机制，外部调用者需保证 reportEvent() 和 moveToNext()
+// 的调用串行化（通常通过 GenerateStream::mutex_ 保护）。
 struct GenerateStateMachine {
 public:
     GenerateStateMachine(std::shared_ptr<StreamCacheResource> stream_cache_resource):
         stream_cache_resource_(stream_cache_resource) {}
 
     // 统一的事件上报接口
+    // 注意：此方法非线程安全，外部应当仅通过GenerateStream在持锁路径下调用
     void reportEvent(StreamEvents::EventType event,
                      ErrorCode               error_code = ErrorCode::NONE_ERROR,
                      const std::string&      error_msg  = "") {
