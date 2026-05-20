@@ -13,6 +13,7 @@
 #include "autil/StringUtil.h"
 #include "autil/StackTracer.h"
 #include "autil/EnvUtil.h"
+#include "autil/TimeUtility.h"
 #include <unistd.h>
 #include <sstream>
 #include <iomanip>
@@ -340,7 +341,11 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         return;
     }
     if (!cache_store) {
-        RTP_LLM_LOG_DEBUG("cache_store is null, skip writeCacheStore");
+        static std::once_flag flag;
+        std::call_once(flag, []() {
+            RTP_LLM_LOG_INFO(
+                "runtimeWriteCacheStore: cache_store is null, NormalCacheStore path disabled (decode_entrance mode). This message prints once.");
+        });
         return;
     }
 
@@ -717,8 +722,18 @@ void execWriteCacheStore(const CacheStoreInputs&       inputs,
                          bool                          mla_kvcache,
                          std::shared_ptr<CacheStore>   cache_store,
                          IKVCacheConnectorCoordinator* connector_coordinator) {
+    auto t0 = autil::TimeUtility::currentTimeInMicroSeconds();
     runtimeWriteCacheStore(inputs, kv_cache, mla_kvcache, std::move(cache_store));
+    auto t1 = autil::TimeUtility::currentTimeInMicroSeconds();
     writeCacheToConnector(inputs, connector_coordinator);
+    auto t2 = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (t2 - t0 > 10000) {
+        RTP_LLM_LOG_WARNING(
+            "execWriteCacheStore slow: runtimeWriteCacheStore=%ldus writeCacheToConnector=%ldus total=%ldus",
+            t1 - t0,
+            t2 - t1,
+            t2 - t0);
+    }
 }
 
 // ============================================================

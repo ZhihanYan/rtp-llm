@@ -16,6 +16,7 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     }
     initLocalHostInfo();
     initLocalPeerInfo();
+    RTP_LLM_LOG_INFO("RemoteRpcServer::init init_cache_store=%d", init_cache_store);
     if (init_cache_store) {
         initCacheStore(maga_init_params, propose_params_ptr);
     }

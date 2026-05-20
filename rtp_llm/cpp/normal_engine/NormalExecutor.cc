@@ -168,6 +168,21 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        if (executor_collector.model_forward_us > 500000) {
+            RTP_LLM_LOG_WARNING("model_forward slow: %ldus (ctx_batch=%zu, gen_batch=%zu, tokens=%zu)",
+                                executor_collector.model_forward_us,
+                                stream_groups.totalContextBatchSize(),
+                                stream_groups.totalDecodeBatchSize(),
+                                stream_groups.modelExecuteTokenSize());
+        } else {
+            RTP_LLM_INTERVAL_LOG(30,
+                                 INFO,
+                                 "model_forward: %ldus (ctx_batch=%zu, gen_batch=%zu, tokens=%zu)",
+                                 executor_collector.model_forward_us,
+                                 stream_groups.totalContextBatchSize(),
+                                 stream_groups.totalDecodeBatchSize(),
+                                 stream_groups.modelExecuteTokenSize());
+        }
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
