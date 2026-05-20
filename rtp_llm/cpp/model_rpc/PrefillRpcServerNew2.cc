@@ -7,7 +7,7 @@ namespace rtp_llm {
 grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                                maga_init_params,
                                         py::object                                             mm_process_engine,
                                         std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params) {
-    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params));
+    auto ret = RemoteRpcServer::init(maga_init_params, mm_process_engine, std::move(propose_params), false);
     if (!ret.ok()) {
         RTP_LLM_LOG_ERROR("prefill rpc server new2 init failed, err: %s", ret.error_message().c_str());
         return ret;
