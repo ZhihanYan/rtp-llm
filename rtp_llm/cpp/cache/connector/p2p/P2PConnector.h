@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include <c10/core/Event.h>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -31,7 +32,8 @@ class P2PConnector: public KVCacheConnector {
 public:
     P2PConnector(P2PConnectorConfig                          config,
                  const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                 const kmonitor::MetricsReporterPtr&         metrics_reporter);
+                 const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                 const KVCacheAllocatorPtr&                  allocator = nullptr);
     ~P2PConnector() override;
 
 public:
@@ -98,6 +100,7 @@ private:
     const P2PConnectorConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
+    KVCacheAllocatorPtr                  allocator_;
 
     std::shared_ptr<P2PConnectorScheduler>     scheduler_;
     std::shared_ptr<P2PConnectorWorker>        worker_;

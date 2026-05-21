@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
@@ -24,8 +25,10 @@ struct P2PConnectorResourceEntry {
     int64_t            request_id;         // 请求 ID
     std::string        unique_key;         // 路由唯一标识（从 Meta::P2PRoutingContext 填充）
     KVCacheResourcePtr kv_cache_resource;  // KV cache 资源引用，用于保持引用计数
-    int64_t            deadline_ms;        // 过期时间
-    int64_t            add_time_us;        // 添加时间
+    KVCacheResourcePtr connector_lease;    // connector ref-counted lease: 通过 incrKVCacheRef 获取，
+                                           // 析构时自动 decrKVCacheRef，防止 block 在 P2P 传输期间被回收
+    int64_t deadline_ms;                   // 过期时间
+    int64_t add_time_us;                   // 添加时间
 
     // Side-channel data (filled by prefill when first token / SP data is produced)
     struct SideChannelData {
@@ -56,7 +59,10 @@ struct P2PSideChannelStoreEntry {
 // 需要将资源移除。unique_key 目前由 decode 生成, 后续可能由 master 统一生成保证全局唯一。
 class P2PConnectorResourceStore {
 public:
-    P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter, int timeout_check_interval_ms);
+    P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter,
+                              int                                 timeout_check_interval_ms,
+                              int64_t                             resource_hold_ms = 0,
+                              const KVCacheAllocatorPtr&          allocator        = nullptr);
     ~P2PConnectorResourceStore();
 
 public:
@@ -121,6 +127,8 @@ private:
 
     autil::LoopThreadPtr check_timeout_thread_;
     int                  timeout_check_interval_ms_;
+    int64_t              resource_hold_ms_;  // max time a resource sits in store before expiry (0 = use entry deadline)
+    KVCacheAllocatorPtr  allocator_;         // for connector ref counting (incrKVCacheRef/decrKVCacheRef)
 };
 
 }  // namespace rtp_llm

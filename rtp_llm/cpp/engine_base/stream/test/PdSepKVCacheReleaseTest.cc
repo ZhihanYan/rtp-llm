@@ -20,6 +20,9 @@
 #include <memory>
 #include <thread>
 
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
+
 namespace rtp_llm {
 
 // =============================================================================
@@ -326,6 +329,197 @@ TEST_F(PdSepKVCacheReleaseTest, testHoldWithoutReleasePDSep_ResourceReleasedStil
     // After ref drop, blocks should be returned (minus any held by device cache for reuse)
     EXPECT_GE(cache_manager_->freeBlocksNum(), initial_free_blocks_ - 2)
         << "Blocks should be freed once pd_kvcache_ref_ is dropped (minus device cache refs)";
+}
+
+// =============================================================================
+// Test 8: Connector lease in P2PConnectorResourceStore protects blocks
+// Simulates the decode_entrance path where:
+//   1. Stream allocates KV blocks
+//   2. addResource() is called (connector_lease created via incrKVCacheRef)
+//   3. Stream is destroyed (requestFree), but blocks survive due to connector_lease
+//   4. Resource entry is stolen and destroyed → blocks finally freed
+// This validates the Plan B fix for the decode_entrance coredump.
+// =============================================================================
+TEST_F(PdSepKVCacheReleaseTest, testConnectorLease_ProtectsBlocksDuringP2PTransfer) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    allocateAndFinish();
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_GT(resource.curBlocksNum(), 0);
+    auto free_before_release = cache_manager_->freeBlocksNum();
+
+    // Create a KVCacheResource (shared_ptr) that mimics what asyncMatch produces
+    auto& batch_resource = resource.batch_kv_cache_resource_->cacheResource(0);
+    auto  kv_cache_ptr   = std::make_shared<KVCacheResource>(batch_resource);
+
+    // Create P2PConnectorResourceStore WITH the allocator (connector_lease enabled)
+    auto store = std::make_unique<P2PConnectorResourceStore>(nullptr, 100, cache_manager_->allocator_);
+    ASSERT_TRUE(store->init());
+
+    // Simulate addResource (what asyncMatch does in the decode_entrance path)
+    auto meta = std::make_shared<GenerateInput>();
+    // Use the Meta interface to call addResource — build a MockMeta-like wrapper
+    // Since we need p2pRouting(), directly create an entry simulating addResource logic:
+    {
+        auto entry               = std::make_shared<P2PConnectorResourceEntry>();
+        entry->request_id        = 9999;
+        entry->unique_key        = "test_connector_lease";
+        entry->kv_cache_resource = kv_cache_ptr;
+        entry->deadline_ms       = currentTimeMs() + 60000;
+        entry->add_time_us       = currentTimeUs();
+
+        // Acquire connector lease (same logic as addResource with allocator)
+        const auto& cache_keys = kv_cache_ptr->cacheKeys();
+        if (!cache_keys.empty()) {
+            entry->connector_lease =
+                cache_manager_->allocator_->incrKVCacheRef(*kv_cache_ptr, cache_keys, /*is_connector=*/true);
+        }
+        ASSERT_NE(entry->connector_lease, nullptr) << "connector_lease should be created";
+
+        // Manually put entry into the store's map (since we can't use addResource without real Meta)
+        {
+            std::lock_guard<std::mutex> lock(store->resource_map_mutex_);
+            store->resource_map_["test_connector_lease"] = entry;
+        }
+    }
+
+    // Step: Stream is destroyed → releaseResource → requestFree
+    // This decrements req_con_ref_counter, but connector_lease holds a connector ref,
+    // so blocks should NOT be freed.
+    stream_->releaseResource();
+    EXPECT_TRUE(resource.resource_released_);
+
+    // Key assertion: blocks are still held by connector_lease
+    // freeBlocksNum should NOT have increased back to initial (blocks still pinned)
+    auto free_after_stream_release = cache_manager_->freeBlocksNum();
+    EXPECT_EQ(free_after_stream_release, free_before_release)
+        << "Blocks should NOT be freed yet because connector_lease holds connector ref. "
+        << "free_before=" << free_before_release << " free_after=" << free_after_stream_release;
+
+    // Step: Steal resource entry from store (simulates handleRead completing)
+    auto stolen_entry = store->waitAndStealResource("test_connector_lease", currentTimeMs() + 100);
+    ASSERT_NE(stolen_entry, nullptr);
+    ASSERT_NE(stolen_entry->connector_lease, nullptr);
+
+    // Step: Destroy the stolen entry → connector_lease destructor → connectorFree
+    // Now blocks should be freed.
+    stolen_entry.reset();
+
+    auto free_after_lease_drop = cache_manager_->freeBlocksNum();
+    EXPECT_GT(free_after_lease_drop, free_before_release)
+        << "Blocks should be freed after connector_lease is dropped. "
+        << "free_before=" << free_before_release << " free_after=" << free_after_lease_drop;
+    EXPECT_GE(free_after_lease_drop, initial_free_blocks_ - 1)
+        << "Almost all blocks should be returned to pool. "
+        << "free=" << free_after_lease_drop << " initial=" << initial_free_blocks_;
+
+    store.reset();
+}
+
+// =============================================================================
+// Test 9: Race condition — concurrent stream destruction and connector_lease drop
+// Engine thread destroys stream while P2P thread holds connector_lease.
+// Multiple iterations to stress-test the race window.
+// =============================================================================
+TEST_F(PdSepKVCacheReleaseTest, testConnectorLease_RaceWithStreamDestruction) {
+    constexpr int kIterations = 20;
+
+    for (int iter = 0; iter < kIterations; ++iter) {
+        prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16});
+        allocateAndFinish();
+
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_GT(resource.curBlocksNum(), 0);
+
+        // Create connector_lease (same as P2PConnectorResourceStore::addResource)
+        auto&              batch_resource = resource.batch_kv_cache_resource_->cacheResource(0);
+        auto               kv_cache_ptr   = std::make_shared<KVCacheResource>(batch_resource);
+        const auto&        cache_keys     = kv_cache_ptr->cacheKeys();
+        KVCacheResourcePtr connector_lease;
+        if (!cache_keys.empty()) {
+            connector_lease =
+                cache_manager_->allocator_->incrKVCacheRef(*kv_cache_ptr, cache_keys, /*is_connector=*/true);
+        }
+        ASSERT_NE(connector_lease, nullptr) << "iter=" << iter;
+
+        std::atomic<bool> stream_released{false};
+        std::atomic<bool> lease_dropped{false};
+
+        // Thread 1: engine thread destroys stream (calls requestFree on blocks)
+        std::thread engine_thread([&]() {
+            stream_->releaseResource();
+            stream_released.store(true);
+        });
+
+        // Thread 2: P2P thread holds lease for a bit, then drops it (simulates handleRead return)
+        std::thread p2p_thread([&]() {
+            // Small random-ish delay to increase race variety
+            std::this_thread::sleep_for(std::chrono::microseconds(50 * (iter % 5)));
+            connector_lease.reset();
+            lease_dropped.store(true);
+        });
+
+        engine_thread.join();
+        p2p_thread.join();
+
+        EXPECT_TRUE(stream_released.load()) << "iter=" << iter;
+        EXPECT_TRUE(lease_dropped.load()) << "iter=" << iter;
+
+        // After both threads complete, blocks should be freed (no leak, no double-free crash)
+        EXPECT_GE(cache_manager_->freeBlocksNum(), initial_free_blocks_ - 1)
+            << "Blocks should be freed after both release and lease drop. iter=" << iter
+            << " free=" << cache_manager_->freeBlocksNum() << " initial=" << initial_free_blocks_;
+
+        // Reset for next iteration
+        stream_.reset();
+    }
+}
+
+// =============================================================================
+// Test 10: Without connector_lease (nullptr allocator), blocks freed immediately on stream release
+// Demonstrates that without Plan B fix, blocks would be freed while P2P transfer is in flight.
+// =============================================================================
+TEST_F(PdSepKVCacheReleaseTest, testNoConnectorLease_BlocksFreedImmediately) {
+    prepareStream({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14});
+    allocateAndFinish();
+
+    auto& resource = stream_->streamCacheResource();
+    ASSERT_GT(resource.curBlocksNum(), 0);
+    auto free_before_release = cache_manager_->freeBlocksNum();
+
+    // Create a store WITHOUT allocator (simulates the old code path without Plan B fix)
+    auto store_no_alloc = std::make_unique<P2PConnectorResourceStore>(nullptr, 100, nullptr);
+    ASSERT_TRUE(store_no_alloc->init());
+
+    // Simulate addResource without connector_lease
+    auto& batch_resource = resource.batch_kv_cache_resource_->cacheResource(0);
+    auto  kv_cache_ptr   = std::make_shared<KVCacheResource>(batch_resource);
+    {
+        auto entry               = std::make_shared<P2PConnectorResourceEntry>();
+        entry->request_id        = 8888;
+        entry->unique_key        = "test_no_lease";
+        entry->kv_cache_resource = kv_cache_ptr;
+        entry->deadline_ms       = currentTimeMs() + 60000;
+        entry->add_time_us       = currentTimeUs();
+        // No connector_lease set (allocator is nullptr)
+        EXPECT_EQ(entry->connector_lease, nullptr);
+
+        std::lock_guard<std::mutex> lock(store_no_alloc->resource_map_mutex_);
+        store_no_alloc->resource_map_["test_no_lease"] = entry;
+    }
+
+    // Stream is destroyed → blocks freed immediately (no connector protection)
+    stream_->releaseResource();
+    EXPECT_TRUE(resource.resource_released_);
+
+    auto free_after_stream_release = cache_manager_->freeBlocksNum();
+    // Without connector_lease, blocks ARE freed on requestFree (this is the bug scenario)
+    EXPECT_GT(free_after_stream_release, free_before_release)
+        << "WITHOUT connector_lease, blocks are freed immediately on stream release "
+        << "(this is the use-after-free vulnerability). "
+        << "free_before=" << free_before_release << " free_after=" << free_after_stream_release;
+
+    store_no_alloc.reset();
 }
 
 }  // namespace rtp_llm

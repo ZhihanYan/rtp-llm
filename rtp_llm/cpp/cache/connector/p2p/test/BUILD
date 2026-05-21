@@ -110,3 +110,19 @@ cc_test(
     copts = test_copts,
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "p2p_connector_worker_decode_lease_test",
+    srcs = [
+        "P2PConnectorWorkerDecodeLeaseTest.cc",
+        "main.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "@com_google_googletest//:gtest",
+        "//rtp_llm/cpp/testing:device_test_utils",
+    ] + device_impl_target(),
+    copts = test_copts,
+    exec_properties = {'gpu':'A10'},
+)

@@ -473,4 +473,151 @@ TEST_F(P2PConnectorResourceStoreTest, MarkCancelled_CancelRecordConsumedAfterRej
     ASSERT_NE(entry, nullptr);
 }
 
+// ==================== resource_hold_ms 方案 D 测试 ====================
+
+class P2PConnectorResourceStoreHoldMsTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        // resource_hold_ms = 200ms, timeout_check_interval = 50ms
+        stream_store_ = std::make_unique<P2PConnectorResourceStore>(nullptr, 50, 200);
+        ASSERT_TRUE(stream_store_->init());
+    }
+
+    void TearDown() override {
+        stream_store_.reset();
+    }
+
+    int64_t getDeadlineMs(int64_t offset_ms = 60000) {
+        return currentTimeMs() + offset_ms;
+    }
+
+    std::shared_ptr<MockMeta> createMockMeta(const std::string& unique_key, int64_t request_id, int64_t deadline_ms) {
+        auto meta = std::make_shared<MockMeta>();
+        meta->setUniqueKey(unique_key);
+        meta->setRequestId(request_id);
+        meta->setDeadlineMs(deadline_ms);
+        meta->setPrefillAddr("127.0.0.1", 12345);
+        meta->setPrefillTpSize(1);
+        return meta;
+    }
+
+    KVCacheResourcePtr createMockKVCacheResource() {
+        return std::make_shared<KVCacheResource>();
+    }
+
+protected:
+    std::unique_ptr<P2PConnectorResourceStore> stream_store_;
+};
+
+// Resource is added with a long business deadline (60s), but hold_ms caps it to ~200ms.
+// After 200ms the entry is removed and key placed into cancelled_keys_.
+TEST_F(P2PConnectorResourceStoreHoldMsTest, ResourceExpiredByHoldMs_FreesBlocks) {
+    const std::string unique_key  = "hold_expire_key";
+    const int64_t     request_id  = 5001;
+    const int64_t     deadline_ms = getDeadlineMs(60000);  // business deadline: 60s from now
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Wait for hold_ms (200ms) + check interval (50ms) + margin
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+
+    // Resource should have been expired — steal fails
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 50);
+    EXPECT_EQ(entry, nullptr);
+}
+
+// Decode arrives AFTER hold_ms expiry → sees cancellation immediately (doesn't wait full deadline).
+TEST_F(P2PConnectorResourceStoreHoldMsTest, LateDecodeSeesExpiredKeyImmediately) {
+    const std::string unique_key  = "late_decode_key";
+    const int64_t     request_id  = 5002;
+    const int64_t     deadline_ms = getDeadlineMs(60000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Wait for resource to expire
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+
+    // Now simulate decode arriving with a long deadline — should return immediately (not wait 60s)
+    const auto start_time = currentTimeMs();
+    auto       entry      = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 10000);
+    const auto elapsed_ms = currentTimeMs() - start_time;
+
+    EXPECT_EQ(entry, nullptr);
+    // Should fail fast (within a few backoff cycles), not wait anywhere near 10s
+    EXPECT_LT(elapsed_ms, 100);
+}
+
+// Decode arrives BEFORE hold_ms expiry → succeeds normally.
+TEST_F(P2PConnectorResourceStoreHoldMsTest, DecodeArrivesBeforeHoldExpiry_Succeeds) {
+    const std::string unique_key  = "timely_decode_key";
+    const int64_t     request_id  = 5003;
+    const int64_t     deadline_ms = getDeadlineMs(60000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Steal immediately (within hold window)
+    auto entry = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 500);
+    ASSERT_NE(entry, nullptr);
+    EXPECT_EQ(entry->request_id, request_id);
+}
+
+// After resource expires via hold_ms, addResource for the same key is rejected (cancel record exists).
+TEST_F(P2PConnectorResourceStoreHoldMsTest, AddResourceRejectedAfterHoldExpiry) {
+    const std::string unique_key  = "reject_after_expire_key";
+    const int64_t     request_id  = 5004;
+    const int64_t     deadline_ms = getDeadlineMs(60000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Wait for hold_ms expiry
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+
+    // Try to add again with the same key — should be rejected by cancelled_keys_
+    auto meta2 = createMockMeta(unique_key, request_id + 1, getDeadlineMs(60000));
+    EXPECT_FALSE(stream_store_->addResource(meta2, resource));
+}
+
+// Concurrent: decode thread is waiting when resource expires → wakes up and fails fast.
+TEST_F(P2PConnectorResourceStoreHoldMsTest, WaiterWokenByHoldExpiry) {
+    const std::string unique_key  = "waker_key";
+    const int64_t     request_id  = 5005;
+    const int64_t     deadline_ms = getDeadlineMs(60000);
+    auto              meta        = createMockMeta(unique_key, request_id, deadline_ms);
+    auto              resource    = createMockKVCacheResource();
+
+    // Decode starts waiting before prefill adds resource
+    std::atomic<bool>                          done{false};
+    std::shared_ptr<P2PConnectorResourceEntry> result;
+    int64_t                                    elapsed_ms = 0;
+
+    std::thread decode_thread([&]() {
+        const auto start = currentTimeMs();
+        result           = stream_store_->waitAndStealResource(unique_key, currentTimeMs() + 10000);
+        elapsed_ms       = currentTimeMs() - start;
+        done.store(true);
+    });
+
+    // Let decode thread start waiting
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+
+    // Prefill adds resource — it will expire after ~200ms (hold_ms)
+    ASSERT_TRUE(stream_store_->addResource(meta, resource));
+
+    // Decode should steal before hold_ms expires
+    decode_thread.join();
+
+    EXPECT_TRUE(done.load());
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(result->request_id, request_id);
+    EXPECT_LT(elapsed_ms, 200);  // Should wake up almost immediately when resource appears
+}
+
 }  // namespace rtp_llm

@@ -126,6 +126,13 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
         }
 
         if (ready_layer_buffers.empty()) {
+            // Actively process pending StoreWaitContexts to move layers whose CUDA events
+            // have completed into ComputedLayerCacheBuffer, rather than waiting up to 1s
+            // for the background loopCheckProc thread. This is critical for MTP where
+            // draft model layers may still be in StoreWaitContext when sendKVCache runs.
+            if (store_wait_context_checker_) {
+                store_wait_context_checker_->checkOnce();
+            }
             computed_buffer->waitChange(total_layer_num, 50);
         }
     }
@@ -216,6 +223,25 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
                                        const std::string&                                   unique_key,
                                        int64_t                                              deadline_ms,
                                        const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers) {
+    // For MLA, KV cache is identical across all TP ranks. Only the primary rank
+    // within each decode-target group needs to send. In NP1D mode (prefill_tp > decode_tp),
+    // multiple prefill ranks map to the same decode server; only partition_id=0 rank sends.
+    // This matches the old DecodeRpcServer behavior where partition_count=1 was used.
+    if (config_.is_mla && !decode_transfer_servers.empty()
+        && config_.tp_size > static_cast<int64_t>(decode_transfer_servers.size())) {
+        int local_partition_count = static_cast<int>(config_.tp_size / decode_transfer_servers.size());
+        int local_partition_id    = static_cast<int>(config_.tp_rank % local_partition_count);
+        if (local_partition_id != 0) {
+            RTP_LLM_LOG_DEBUG(
+                "sendKVCache [P2P]: skip for MLA non-primary rank, request_id=%ld, unique_key=%s, tp_rank=%ld",
+                request_id,
+                unique_key.c_str(),
+                config_.tp_rank);
+            computed_buffers_->removeBuffer(request_id);
+            return ErrorInfo::OkStatus();
+        }
+    }
+
     // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
     const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
     const int64_t return_deadline_ms = deadline_ms - return_before_ms;
@@ -273,20 +299,19 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
     const bool all_callbacks_received =
         waitSendCallbacksWithTimeout(transfer_result, sent_transfer_count, return_deadline_ms);
 
-    if (all_callbacks_received) {
-        // All RDMA send callbacks have fired: the NIC has DMA'd data out of the source GPU
-        // buffers, so it is safe to release the per-layer KVCacheResource refs now.
-        // Without this, connectorReference'd blocks stay pinned until checkTimeout() fires
-        // (~store_wait_timeout_ms_ later), starving the allocator under load (LACK MEM).
-        // Do NOT call removeBuffer on the timeout path: in-flight RDMA ops may still hold
-        // references into those GPU buffers, and the 10-s timeout is the safety margin.
-        computed_buffers_->removeBuffer(request_id);
-    } else {
+    if (!all_callbacks_received) {
         RTP_LLM_LOG_WARNING(
             "sendKVCache transfer callback wait ended before return_deadline_ms or rdma cap, request_id: %ld, unique_key: %s",
             request_id,
             unique_key.c_str());
     }
+
+    // Always remove the computed buffer entry. This is safe because the caller (handleRead)
+    // holds a whole-request KVCacheResourcePtr in resource_entry, which keeps all blocks
+    // allocated via connector_ref_counter until handleRead returns. The per-layer refs here
+    // are redundant for block lifetime safety. Any late-arriving layers from
+    // StoreWaitContextChecker will simply create a new entry that expires via checkTimeout().
+    computed_buffers_->removeBuffer(request_id);
 
     auto send_result = determineSendResult(transfer_result,
                                            cancel_flag,

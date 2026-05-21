@@ -20,8 +20,12 @@ namespace rtp_llm {
 
 P2PConnector::P2PConnector(P2PConnectorConfig                          config,
                            const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
-                           const kmonitor::MetricsReporterPtr&         metrics_reporter):
-    config_(std::move(config)), layer_block_converter_(layer_block_converter), metrics_reporter_(metrics_reporter) {}
+                           const kmonitor::MetricsReporterPtr&         metrics_reporter,
+                           const KVCacheAllocatorPtr&                  allocator):
+    config_(std::move(config)),
+    layer_block_converter_(layer_block_converter),
+    metrics_reporter_(metrics_reporter),
+    allocator_(allocator) {}
 
 P2PConnector::~P2PConnector() = default;
 
@@ -44,7 +48,10 @@ bool P2PConnector::init() {
 
     // 创建 stream store（用于管理 stream）
     stream_store_ = std::make_shared<P2PConnectorResourceStore>(
-        metrics_reporter_, config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms);
+        metrics_reporter_,
+        config_.scheduler_config.p2p_resource_store_timeout_check_interval_ms,
+        config_.scheduler_config.p2p_transfer_not_done_resource_hold_ms,
+        allocator_);
     if (!stream_store_->init()) {
         RTP_LLM_LOG_ERROR("init failed: stream_store init failed");
         return false;
@@ -383,8 +390,8 @@ grpc::Status P2PConnector::waitForResourceEntry(const std::string&              
         RTP_LLM_LOG_WARNING("waiting for resource cancelled, unique_key: %s", unique_key.c_str());
         return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled");
     }
-    RTP_LLM_LOG_WARNING("resource not found, unique_key: %s", unique_key.c_str());
-    return grpc::Status(grpc::StatusCode::INTERNAL, "resource not found");
+    RTP_LLM_LOG_WARNING("resource not found or expired, unique_key: %s", unique_key.c_str());
+    return grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "resource expired or not found within hold window");
 }
 
 grpc::Status P2PConnector::fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,

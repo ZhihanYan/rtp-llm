@@ -53,8 +53,13 @@ bool waitWithBackoff(Lock&                                 lock,
 namespace rtp_llm {
 
 P2PConnectorResourceStore::P2PConnectorResourceStore(const kmonitor::MetricsReporterPtr& metrics_reporter,
-                                                     int                                 timeout_check_interval_ms):
-    metrics_reporter_(metrics_reporter), timeout_check_interval_ms_(timeout_check_interval_ms) {}
+                                                     int                                 timeout_check_interval_ms,
+                                                     int64_t                             resource_hold_ms,
+                                                     const KVCacheAllocatorPtr&          allocator):
+    metrics_reporter_(metrics_reporter),
+    timeout_check_interval_ms_(timeout_check_interval_ms),
+    resource_hold_ms_(resource_hold_ms),
+    allocator_(allocator) {}
 
 P2PConnectorResourceStore::~P2PConnectorResourceStore() {
     if (check_timeout_thread_) {
@@ -101,12 +106,27 @@ bool P2PConnectorResourceStore::addResource(const std::shared_ptr<Meta>& meta,
                              unique_key.c_str());
             return false;
         }
-        auto entry                = std::make_shared<P2PConnectorResourceEntry>();
-        entry->request_id         = routing->request_id;
-        entry->unique_key         = unique_key;
-        entry->kv_cache_resource  = kv_cache_resource;
-        entry->deadline_ms        = routing->deadline_ms;
-        entry->add_time_us        = currentTimeUs();
+        auto entry               = std::make_shared<P2PConnectorResourceEntry>();
+        entry->request_id        = routing->request_id;
+        entry->unique_key        = unique_key;
+        entry->kv_cache_resource = kv_cache_resource;
+        entry->deadline_ms       = routing->deadline_ms;
+        if (resource_hold_ms_ > 0) {
+            entry->deadline_ms = std::min(entry->deadline_ms, currentTimeMs() + resource_hold_ms_);
+        }
+        entry->add_time_us = currentTimeUs();
+
+        // Acquire connector-level ref on blocks to prevent BlockPool from freeing them
+        // while P2P transfer is in progress. The lease's custom deleter (decrKVCacheRef)
+        // fires when entry is destroyed, releasing the connector ref.
+        if (allocator_ && kv_cache_resource) {
+            const auto& cache_keys = kv_cache_resource->cacheKeys();
+            if (!cache_keys.empty()) {
+                entry->connector_lease =
+                    allocator_->incrKVCacheRef(*kv_cache_resource, cache_keys, /*is_connector=*/true);
+            }
+        }
+
         resource_map_[unique_key] = entry;
     }
     // 通知所有等待的线程
@@ -122,7 +142,10 @@ bool P2PConnectorResourceStore::waitForResourceOrCancellation(std::unique_lock<s
         lock,
         resource_cv_,
         timeout_tp,
-        [&]() { return resource_map_.find(unique_key) != resource_map_.end(); },
+        [&]() {
+            return resource_map_.find(unique_key) != resource_map_.end()
+                   || cancelled_keys_.find(unique_key) != cancelled_keys_.end();
+        },
         is_cancelled);
 }
 
@@ -183,7 +206,15 @@ std::shared_ptr<P2PConnectorResourceEntry> P2PConnectorResourceStore::waitAndSte
 
     if (is_cancelled && is_cancelled()) {
         reportMetrics(false, true, start_time_us);
-        return nullptr;  // 因取消退出，不取资源
+        return nullptr;
+    }
+
+    // Resource was expired by checkTimeout before decode arrived — fail fast.
+    if (cancelled_keys_.find(unique_key) != cancelled_keys_.end()) {
+        reportMetrics(true, false, start_time_us);
+        RTP_LLM_LOG_WARNING("P2PConnectorResourceStore::waitAndStealResource resource expired, unique_key: %s",
+                            unique_key.c_str());
+        return nullptr;
     }
 
     return stealResourceEntryLocked(unique_key);
@@ -202,15 +233,19 @@ void P2PConnectorResourceStore::checkTimeout() {
                     entry->deadline_ms,
                     current_time_ms);
                 auto wait_start_time_us = entry->add_time_us;
-                it                      = resource_map_.erase(it);
+                // Record in cancelled_keys_ so late-arriving decode sees "expired" immediately
+                // instead of waiting the full business deadline.
+                cancelled_keys_[unique_key] = current_time_ms;
+                it                          = resource_map_.erase(it);
                 reportMetrics(true, false, wait_start_time_us);
             } else {
                 ++it;
             }
         }
-        // Clean up cancelled_keys_ entries that are old enough that addResource() will never
-        // be called for them (give 60s beyond the cancel time as a conservative upper bound).
-        constexpr int64_t kCancelledKeyTTLMs = 60 * 1000;
+        // Clean up cancelled_keys_ entries that are old enough that neither addResource() nor
+        // waitAndStealResource() will ever be called for them. Use 1h as an upper bound to
+        // cover the full business deadline window.
+        constexpr int64_t kCancelledKeyTTLMs = 3600 * 1000;
         for (auto it = cancelled_keys_.begin(); it != cancelled_keys_.end();) {
             if (current_time_ms >= it->second + kCancelledKeyTTLMs) {
                 it = cancelled_keys_.erase(it);
@@ -224,6 +259,9 @@ void P2PConnectorResourceStore::checkTimeout() {
             metrics_reporter_->report<P2PConnectorMetrics, StreamStoreCountMetricsCollector>(nullptr, collector.get());
         }
     }
+    // Wake up any decode threads waiting in waitForResourceOrCancellation so they
+    // re-check cancelled_keys_ and fail fast instead of sleeping until their deadline.
+    resource_cv_.notify_all();
 
     {
         std::lock_guard<std::mutex> lock(side_channel_map_mutex_);

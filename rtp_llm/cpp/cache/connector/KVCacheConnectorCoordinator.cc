@@ -425,12 +425,14 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
         return true;
     }
     const uint32_t layer_all_num         = static_cast<uint32_t>(cache_config_.layer_all_num);
+    const bool     is_mla                = cache_config_.use_mla || cache_config_.is_sparse;
     auto           layer_block_converter = std::make_shared<LayerBlockConverterImpl>(allocator_);
 
     auto p2p_config = P2PConnectorConfig::create(
-        runtime_config_, cache_store_config_, parallelism_config_, pd_sep_config_, layer_all_num);
+        runtime_config_, cache_store_config_, parallelism_config_, pd_sep_config_, layer_all_num, is_mla);
     p2p_config.scheduler_config.layer_attn_types = cache_config_.layer_attn_types;
-    auto p2p = std::make_shared<P2PConnector>(std::move(p2p_config), layer_block_converter, metrics_reporter_);
+    auto p2p =
+        std::make_shared<P2PConnector>(std::move(p2p_config), layer_block_converter, metrics_reporter_, allocator_);
     if (!p2p->init()) {
         RTP_LLM_LOG_ERROR("P2PConnector init failed");
         p2p.reset();  // 显式释放，避免半初始化状态的 P2PConnector 意外使用

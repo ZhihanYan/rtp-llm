@@ -60,3 +60,19 @@ cc_test(
     },
     exec_properties = {'gpu':'A10'},
 )
+
+cc_test(
+    name = "pd_sep_kvcache_release_test",
+    srcs = [
+        "PdSepKVCacheReleaseTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/connector/p2p:components",
+    ],
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'A10'},
+)
