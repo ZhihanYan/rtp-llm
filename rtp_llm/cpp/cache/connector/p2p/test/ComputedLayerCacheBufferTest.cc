@@ -151,6 +151,21 @@ TEST_F(ComputedLayerCacheBufferTest, GetBuffersReturnsStoredLayerCountForWaitCha
     EXPECT_EQ(final_buffers.size(), 2);
 }
 
+TEST_F(ComputedLayerCacheBufferTest, MarkLayerDoneWithoutBufferCountsAsReadyLayerWithoutSendBuffer) {
+    int64_t request_id  = 1009;
+    int64_t deadline_ms = getDeadlineMs();
+
+    ComputedLayerCacheBuffer computed_buffer(request_id, nullptr, deadline_ms);
+    computed_buffer.markLayerDoneWithoutBuffer(0, deadline_ms);
+
+    auto ready_layer_ids         = computed_buffer.getReadyLayerIds({0, 1});
+    auto [stored_layer_count, ready_buffers] = computed_buffer.getBuffers({0, 1});
+    ASSERT_EQ(ready_layer_ids.size(), 1u);
+    EXPECT_EQ(ready_layer_ids[0], 0);
+    EXPECT_EQ(stored_layer_count, 1);
+    EXPECT_TRUE(ready_buffers.empty());
+}
+
 // ==================== ComputedLayerCacheBufferStore 类测试 ====================
 
 TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {

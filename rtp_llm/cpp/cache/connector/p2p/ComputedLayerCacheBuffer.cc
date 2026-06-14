@@ -32,17 +32,39 @@ void ComputedLayerCacheBuffer::addBuffer(const std::shared_ptr<LayerCacheBuffer>
     condition_variable_.notify_all();
 }
 
+void ComputedLayerCacheBuffer::markLayerDoneWithoutBuffer(int layer_id, int64_t deadline_ms) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    layer_cache_buffers_.try_emplace(layer_id, nullptr);
+    int64_t cur = deadline_ms_.load(std::memory_order_relaxed);
+    if (deadline_ms > cur) {
+        deadline_ms_.store(deadline_ms, std::memory_order_relaxed);
+    }
+    condition_variable_.notify_all();
+}
+
 std::pair<int, std::vector<std::shared_ptr<LayerCacheBuffer>>>
 ComputedLayerCacheBuffer::getBuffers(const std::set<int>& layer_ids) {
     std::lock_guard<std::mutex>                    lock(mutex_);
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (auto layer_id : layer_ids) {
         auto iter = layer_cache_buffers_.find(layer_id);
-        if (iter != layer_cache_buffers_.end()) {
+        if (iter != layer_cache_buffers_.end() && iter->second) {
             layer_cache_buffers.push_back(iter->second);
         }
     }
     return {static_cast<int>(layer_cache_buffers_.size()), layer_cache_buffers};
+}
+
+std::vector<int> ComputedLayerCacheBuffer::getReadyLayerIds(const std::set<int>& layer_ids) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<int>            ready_layer_ids;
+    ready_layer_ids.reserve(layer_ids.size());
+    for (auto layer_id : layer_ids) {
+        if (layer_cache_buffers_.find(layer_id) != layer_cache_buffers_.end()) {
+            ready_layer_ids.push_back(layer_id);
+        }
+    }
+    return ready_layer_ids;
 }
 
 void ComputedLayerCacheBuffer::waitChange(int last_layer_num, int timeout_ms) {
@@ -76,6 +98,26 @@ std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::addBuff
 
     auto new_computed_layer_cache_buffer =
         std::make_shared<ComputedLayerCacheBuffer>(request_id, layer_cache_buffer, deadline_ms);
+    computed_buffers_[request_id] = new_computed_layer_cache_buffer;
+    return new_computed_layer_cache_buffer;
+}
+
+std::shared_ptr<ComputedLayerCacheBuffer>
+ComputedLayerCacheBufferStore::markLayerDoneWithoutBuffer(int64_t request_id, int layer_id, int64_t deadline_ms) {
+    std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
+
+    if (removed_request_ids_.count(request_id)) {
+        return nullptr;
+    }
+
+    auto iter = computed_buffers_.find(request_id);
+    if (iter != computed_buffers_.end()) {
+        iter->second->markLayerDoneWithoutBuffer(layer_id, deadline_ms);
+        return iter->second;
+    }
+
+    auto new_computed_layer_cache_buffer = std::make_shared<ComputedLayerCacheBuffer>(request_id, nullptr, deadline_ms);
+    new_computed_layer_cache_buffer->markLayerDoneWithoutBuffer(layer_id, deadline_ms);
     computed_buffers_[request_id] = new_computed_layer_cache_buffer;
     return new_computed_layer_cache_buffer;
 }

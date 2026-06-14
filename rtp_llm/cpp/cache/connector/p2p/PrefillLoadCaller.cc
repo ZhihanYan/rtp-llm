@@ -114,13 +114,12 @@ bool extractLegacyStartLoadPayload(const P2PConnectorStartLoadResponsePB& respon
 /// Process-wide lazy-started background drainer for abandoned CompletionQueues.
 ///
 /// Triggered by PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue when the
-/// 100ms in-line drain budget elapses without SHUTDOWN. Holds the shared_ptr<Result>
-/// to keep CompletionQueue + ClientContext + reader alive (gRPC requires fully draining
-/// the CQ before destruction, otherwise UB).
+/// 100ms in-line drain budget elapses without SHUTDOWN. Holds the detached drain
+/// resources to keep CompletionQueue + ClientContext + reader alive (gRPC requires
+/// fully draining the CQ before destruction, otherwise UB).
 ///
 /// Background loop: every 100ms, attempt AsyncNext with 1s budget on each pending entry;
-/// on SHUTDOWN, drop the entry (Result destructor then runs as a no-op since
-/// completion_queue_shutdown_drained_ is already set).
+/// on SHUTDOWN, drop the entry.
 class DeferredCompletionQueueDrainer {
 public:
     static DeferredCompletionQueueDrainer& instance() {
@@ -128,12 +127,12 @@ public:
         return drainer;
     }
 
-    void enqueue(std::shared_ptr<PrefillLoadCaller::Result> result) {
+    void enqueue(std::shared_ptr<PrefillLoadCaller::Result::DeferredDrainResources> resources) {
         std::lock_guard<std::mutex> lock(mu_);
-        if (stop_ || !result) {
+        if (stop_ || !resources) {
             return;
         }
-        pending_.push_back(std::move(result));
+        pending_.push_back(std::move(resources));
         if (!started_) {
             started_ = true;
             thread_  = std::thread([this] { run(); });
@@ -155,10 +154,6 @@ public:
         if (thread_.joinable()) {
             thread_.join();
         }
-        // pending_ entries destructed here. If any still hold undrained CQs, the
-        // ~Result path will attempt one more bounded drain; if it fails again,
-        // shared_from_this in the dtor context throws and we accept the gRPC leak
-        // (only happens at process shutdown).
     }
 
 private:
@@ -166,7 +161,7 @@ private:
 
     void run() {
         while (true) {
-            std::list<std::shared_ptr<PrefillLoadCaller::Result>> local;
+            std::list<std::shared_ptr<PrefillLoadCaller::Result::DeferredDrainResources>> local;
             {
                 std::unique_lock<std::mutex> lock(mu_);
                 cv_.wait_for(lock, std::chrono::milliseconds(100), [this] { return stop_ || !pending_.empty(); });
@@ -176,22 +171,20 @@ private:
                 local.splice(local.end(), pending_);
             }
 
-            std::list<std::shared_ptr<PrefillLoadCaller::Result>> remaining;
-            for (auto& result : local) {
-                if (!result || !result->completion_queue) {
+            std::list<std::shared_ptr<PrefillLoadCaller::Result::DeferredDrainResources>> remaining;
+            for (auto& resources : local) {
+                if (!resources || !resources->completion_queue) {
                     continue;
                 }
                 void*      tag      = nullptr;
                 bool       ok       = false;
                 const auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(1);
-                auto       status   = result->completion_queue->AsyncNext(&tag, &ok, deadline);
+                auto       status   = resources->completion_queue->AsyncNext(&tag, &ok, deadline);
                 if (status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
-                    // Fully drained. Mark and drop ref; ~Result runs as no-op via the drained flag.
-                    result->completion_queue_shutdown_drained_ = true;
                     continue;
                 }
                 // TIMEOUT or GOT_EVENT — keep trying next round.
-                remaining.push_back(std::move(result));
+                remaining.push_back(std::move(resources));
             }
 
             if (!remaining.empty()) {
@@ -203,7 +196,7 @@ private:
 
     mutable std::mutex                                    mu_;
     std::condition_variable                               cv_;
-    std::list<std::shared_ptr<PrefillLoadCaller::Result>> pending_;
+    std::list<std::shared_ptr<PrefillLoadCaller::Result::DeferredDrainResources>> pending_;
     bool                                                  stop_    = false;
     bool                                                  started_ = false;
     std::thread                                           thread_;
@@ -342,10 +335,9 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
     completion_queue->Shutdown();
 
     // Bounded drain. If we exceed kDrainBudgetMs without SHUTDOWN, hand the CQ + reader
-    // + context off to DeferredCompletionQueueDrainer (a background thread that keeps
-    // shared_ptr<Result> alive until SHUTDOWN). This unblocks the caller (typically the
-    // checker thread holding async_contexts_mutex_) — see DingTalk doc §7 for the
-    // production 8-min stall we are fixing.
+    // + context off to DeferredCompletionQueueDrainer via a detached shared state. This
+    // unblocks the caller (typically the checker thread holding async_contexts_mutex_) —
+    // see DingTalk doc §7 for the production 8-min stall we are fixing.
     constexpr int64_t kDrainBudgetMs = 100;
     const auto        deadline       = std::chrono::system_clock::now() + std::chrono::milliseconds(kDrainBudgetMs);
 
@@ -364,23 +356,29 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
                 server_addr.c_str(),
                 unique_key.c_str(),
                 kDrainBudgetMs);
-            // Mark drained BEFORE handing off so ~Result is a no-op when the drainer drops its ref.
+            auto deferred_resources = releaseDeferredDrainResources();
             completion_queue_shutdown_drained_ = true;
-            try {
-                DeferredCompletionQueueDrainer::instance().enqueue(shared_from_this());
-            } catch (const std::bad_weak_ptr&) {
-                // Called outside a shared_ptr (e.g. from ~Result when count is already 0).
-                // Falling through leaks the CQ resources; this only happens in shutdown corner
-                // cases and is preferable to the prior unbounded Next() that caused the stall.
-                RTP_LLM_LOG_WARNING(
-                    "[PD-DIAG] PrefillLoadCaller drain abandoned but cannot hand off "
-                    "(shared_from_this failed); leaking CQ for server_addr=%s",
-                    server_addr.c_str());
+            if (deferred_resources) {
+                DeferredCompletionQueueDrainer::instance().enqueue(std::move(deferred_resources));
             }
             return;
         }
         // GOT_EVENT: drained one tag, loop again until SHUTDOWN or TIMEOUT.
     }
+}
+
+std::shared_ptr<PrefillLoadCaller::Result::DeferredDrainResources>
+PrefillLoadCaller::Result::releaseDeferredDrainResources() {
+    if (!client_context && !completion_queue && !reader) {
+        return nullptr;
+    }
+    auto resources              = std::make_shared<DeferredDrainResources>();
+    resources->client_context   = std::move(client_context);
+    resources->completion_queue = std::move(completion_queue);
+    resources->reader           = std::move(reader);
+    resources->server_addr      = server_addr;
+    resources->unique_key       = unique_key;
+    return resources;
 }
 
 void PrefillLoadCaller::Result::cancel() {
@@ -447,8 +445,8 @@ bool PrefillLoadCaller::Result::pollCompletionQueue() {
 void PrefillLoadCaller::Result::updateStreamFromResponse() {
     if (response.has_payload()) {
         const auto& payload = response.payload();
-        side_channel_payload.has_first_token =
-            payload.has_first_generate_token() || payload.first_generate_token_id() != 0;
+        // `has_first_generate_token` is a semantic bool field, not proto presence.
+        side_channel_payload.has_first_token   = payload.has_first_generate_token();
         side_channel_payload.first_token_id   = payload.first_generate_token_id();
         side_channel_payload.total_reuse_len  = payload.total_reuse_len();
         side_channel_payload.local_reuse_len  = payload.local_reuse_len();

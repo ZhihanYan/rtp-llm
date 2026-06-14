@@ -145,6 +145,14 @@ class BackendRPCServerVisitor:
         logging.info(f"configured backend role list: {role_list}")
         return role_list
 
+    def _required_backend_roles(self, input: GenerateInput) -> List[RoleType]:
+        require_vit = bool(getattr(input, "mm_inputs", None))
+        return [
+            role
+            for role in self.backend_role_list
+            if role != RoleType.VIT or require_vit
+        ]
+
     async def get_master_route_addrs(
         self, input: GenerateInput
     ) -> Optional[FlexlbResponse]:
@@ -196,8 +204,9 @@ class BackendRPCServerVisitor:
 
     async def get_domain_route_addrs(self, input: GenerateInput):
         specified_roles = {addr.role for addr in input.generate_config.role_addrs}
+        required_roles = self._required_backend_roles(input)
         missing_roles = [
-            role for role in self.backend_role_list if role not in specified_roles
+            role for role in required_roles if role not in specified_roles
         ]
         if not missing_roles:
             route_logger.debug(
@@ -264,8 +273,9 @@ class BackendRPCServerVisitor:
                     master_addr,
                     input_token_batched,
                 )
+            required_roles = self._required_backend_roles(input)
             specified_roles = {addr.role for addr in input.generate_config.role_addrs}
-            need_domain_routing = not set(self.backend_role_list).issubset(
+            need_domain_routing = not set(required_roles).issubset(
                 specified_roles
             )
             allow_domain_fallback = master_route_result is None or (
@@ -283,8 +293,9 @@ class BackendRPCServerVisitor:
 
         kmonitor.report(GaugeMetrics.ROUTE_RT_METRIC, route_timer.cost_ms())
         final_roles = {addr.role for addr in input.generate_config.role_addrs}
+        required_roles = self._required_backend_roles(input)
         missing_roles = [
-            role for role in self.backend_role_list if role not in final_roles
+            role for role in required_roles if role not in final_roles
         ]
         if missing_roles:
             raise FtRuntimeException(
@@ -352,6 +363,9 @@ class BackendRPCServerVisitor:
 
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        if not inputs:
+            return []
+
         for input in inputs:
             self._validate_input(input)
             self.check_sp_supported(input)

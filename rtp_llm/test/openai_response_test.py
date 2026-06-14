@@ -47,7 +47,7 @@ from rtp_llm.openai.renderers.qwen3_code_renderer import Qwen3CoderRenderer
 from rtp_llm.openai.renderers.qwen_reasoning_tool_renderer import (
     QwenReasoningToolRenderer,
 )
-from rtp_llm.ops import FfnDisAggregateConfig, PDSepConfig, SpecialTokens
+from rtp_llm.ops import FfnDisAggregateConfig, PDSepConfig, SpecialTokens, VitSeparation
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.host_service import HostServiceArgs
 from rtp_llm.test.utils.stream_util import (
@@ -2567,6 +2567,79 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Exception, "missing backend role addresses"):
             await visitor.route_ips(input_obj)
 
+    async def test_route_ips_text_request_does_not_require_vit_backend(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+            vit_separation=VitSeparation.VIT_SEPARATION_REMOTE,
+        )
+        visitor.backend_role_list = [RoleType.VIT, RoleType.DECODE]
+        visitor.host_service.get_master_addr = lambda: ""
+        visitor.host_service.service_available = True
+        visitor.host_service.get_queue_length = lambda: 0
+        visitor.host_service.get_backend_role_addrs = lambda roles, refresh=False: [
+            RoleAddr(
+                role=RoleType.DECODE,
+                ip="127.0.0.1",
+                http_port=10000,
+                grpc_port=10001,
+            )
+            for role in roles
+            if role == RoleType.DECODE
+        ]
+
+        input_obj = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[],
+            generate_config=GenerateConfig(),
+        )
+
+        await visitor.route_ips(input_obj)
+        self.assertEqual(
+            {addr.role for addr in input_obj.generate_config.role_addrs},
+            {RoleType.DECODE},
+        )
+
+    async def test_route_ips_multimodal_request_still_requires_vit_backend(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+            vit_separation=VitSeparation.VIT_SEPARATION_REMOTE,
+        )
+        visitor.backend_role_list = [RoleType.VIT, RoleType.DECODE]
+        visitor.host_service.get_master_addr = lambda: ""
+        visitor.host_service.service_available = True
+        visitor.host_service.get_queue_length = lambda: 0
+        visitor.host_service.get_backend_role_addrs = lambda roles, refresh=False: [
+            RoleAddr(
+                role=RoleType.DECODE,
+                ip="127.0.0.1",
+                http_port=10000,
+                grpc_port=10001,
+            )
+            for role in roles
+            if role == RoleType.DECODE
+        ]
+
+        input_obj = GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+            mm_inputs=[object()],
+            generate_config=GenerateConfig(),
+        )
+
+        with self.assertRaisesRegex(Exception, "missing backend role addresses"):
+            await visitor.route_ips(input_obj)
+
     async def test_batch_enqueue_decode_entrance_uses_single_request_path(self):
         pd_sep_config = PDSepConfig()
         pd_sep_config.role_type = RoleType.FRONTEND
@@ -2678,6 +2751,30 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
             ]
         )
 
+        self.assertEqual(results, [])
+
+    async def test_batch_enqueue_empty_inputs_returns_empty_result(self):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        pd_sep_config.decode_entrance = False
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["10.0.0.10:10101"],
+        )
+        visitor.host_service.service_available = True
+
+        async def _unexpected_route(_input_obj: GenerateInput):
+            raise AssertionError("empty batch should not route")
+
+        async def _unexpected_batch_enqueue(_inputs: list[GenerateInput]):
+            raise AssertionError("empty batch should return before RPC")
+
+        visitor.route_ips = _unexpected_route
+        visitor.model_rpc_client.batch_enqueue = _unexpected_batch_enqueue
+
+        results = await visitor.batch_enqueue([])
         self.assertEqual(results, [])
 
     async def test_batch_enqueue_decode_entrance_merges_stream_chunks(self):

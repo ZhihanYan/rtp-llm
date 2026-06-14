@@ -21,8 +21,14 @@ public:
     /// @brief 追加一层 cache buffer 并更新 deadline
     void addBuffer(const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms);
 
+    /// @brief 标记某层已经完成但无需发送实际 buffer（例如空 LINEAR 层 no-op）
+    void markLayerDoneWithoutBuffer(int layer_id, int64_t deadline_ms);
+
     /// @brief 返回当前已有层数及指定层集合对应的缓冲区列表
     std::pair<int, std::vector<std::shared_ptr<LayerCacheBuffer>>> getBuffers(const std::set<int>& layer_ids);
+
+    /// @brief 返回指定层集合中已经完成（含 no-op 层）的 layer_id 列表
+    std::vector<int> getReadyLayerIds(const std::set<int>& layer_ids);
 
     /// @brief 阻塞等待层数变化，直到超过 last_layer_num 或 timeout_ms 超时
     void waitChange(int last_layer_num, int timeout_ms);
@@ -50,6 +56,10 @@ public:
     /// @return nullptr if request_id has been removed (late-arriving layers are rejected)
     std::shared_ptr<ComputedLayerCacheBuffer>
     addBuffer(int64_t request_id, const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer, int64_t deadline_ms);
+
+    std::shared_ptr<ComputedLayerCacheBuffer> markLayerDoneWithoutBuffer(int64_t request_id,
+                                                                         int     layer_id,
+                                                                         int64_t deadline_ms);
 
     std::shared_ptr<ComputedLayerCacheBuffer> getBuffer(int64_t request_id) const;
     void                                      removeBuffer(int64_t request_id);

@@ -57,6 +57,13 @@ public:
         int64_t totalCostTimeUs() const {
             return total_cost_time_us;
         }
+        struct DeferredDrainResources {
+            std::shared_ptr<grpc::ClientContext>                                              client_context;
+            std::shared_ptr<grpc::CompletionQueue>                                            completion_queue;
+            std::unique_ptr<grpc::ClientAsyncResponseReader<P2PConnectorStartLoadResponsePB>> reader;
+            std::string                                                                       server_addr;
+            std::string                                                                       unique_key;
+        };
 
     private:
         bool pollCompletionQueue();
@@ -71,6 +78,7 @@ public:
         ///
         /// Safe to call multiple times (idempotent via completion_queue_shutdown_drained_).
         void shutdownAndDrainCompletionQueue();
+        std::shared_ptr<DeferredDrainResources> releaseDeferredDrainResources();
 
     public:
         bool                                                                              success_ = false;

@@ -49,6 +49,7 @@ struct P2PConnectorSchedulerConfig {
 
 struct P2PConnectorWorkerConfig {
     transfer::TransferBackendConfig transfer_backend_config;
+    std::vector<CacheGroupType>     layer_attn_types;
 
     int64_t p2p_read_steal_before_deadline_ms       = 250;
     int64_t p2p_read_return_before_deadline_ms      = 100;

@@ -96,9 +96,9 @@ void P2PConnectorAsyncReadContext::checkDone() {
 // 在窗口结束前不走常规 merge（避免反复失败/取消）。本函数仅在 `checkDone()` 开头调用，语义：
 // - 未 hold → 返回 false，调用方继续 `tp_sync` / `server_call` 的 checkDone 与 merge。
 // - hold 且当前时间仍早于 until_ms → 返回 true，调用方必须直接 return（短路），不推进子 result、不 merge。
-// - hold 且已到期 → 清 hold、刷新两侧 result；若都已 done 则 applyMergedReadOutcome(..., false)
-// 终态合并（含成功补救），
-//   否则仅 done_=true；返回 true，调用方 return。
+// - hold 且 lease 已全部 stopped → 清 hold、刷新两侧 result；若都已 done 则
+//   applyMergedReadOutcome(..., false) 终态合并（含成功补救），返回 true。
+// - hold 已到期但 lease 仍活跃 → 继续持有资源并延长下一次检查窗口，直到 allStopped，返回 true。
 bool P2PConnectorAsyncReadContext::tryFinishExpiredLeaseHold() {
     if (!lease_hold_pending_.load(std::memory_order_acquire)) {
         return false;
@@ -116,11 +116,14 @@ bool P2PConnectorAsyncReadContext::tryFinishExpiredLeaseHold() {
             "tryFinishExpiredLeaseHold: all ranks stopped via lease poll, unique_key=%s retries=%d",
             uniqueKey().c_str(),
             lease_poll_retry_count_.load());
-    } else {
+    } else if (timed_out) {
         RTP_LLM_LOG_WARNING(
-            "tryFinishExpiredLeaseHold: final_timeout reached without all ranks stopped, unique_key=%s retries=%d",
+            "tryFinishExpiredLeaseHold: hold timeout reached but leases still active, keep holding resources, "
+            "unique_key=%s retries=%d",
             uniqueKey().c_str(),
             lease_poll_retry_count_.load());
+        lease_hold_until_ms_.store(currentTimeMs() + kLeasePollMaxIntervalMs, std::memory_order_relaxed);
+        return true;
     }
 
     lease_hold_pending_.store(false, std::memory_order_release);
@@ -135,12 +138,6 @@ bool P2PConnectorAsyncReadContext::tryFinishExpiredLeaseHold() {
     const bool both_done = tp_sync_result_->done() && server_call_result_->done();
     if (both_done) {
         applyMergedReadOutcome(mergeReadResultsWhenBothDone(), false);
-    } else {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        if (!done_) {
-            done_ = true;
-        }
-        done_cv_.notify_all();
     }
     return true;
 }

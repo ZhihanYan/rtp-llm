@@ -17,6 +17,26 @@ using namespace autil::legacy::json;
 
 namespace rtp_llm {
 
+namespace {
+
+void cancelBatchPeerStreams(const std::vector<GenerateStreamPtr>& streams,
+                            const std::string&                    error_msg,
+                            int                                   failed_idx = -1) {
+    if (streams.size() <= 1) {
+        return;
+    }
+    for (size_t i = 0; i < streams.size(); ++i) {
+        if (static_cast<int>(i) == failed_idx) {
+            continue;
+        }
+        if (streams[i] && !streams[i]->hasError()) {
+            streams[i]->reportError(ErrorCode::CANCELLED, error_msg);
+        }
+    }
+}
+
+}  // namespace
+
 void InferenceParsedRequest::extractRequestTexts(const RawRequest& req, InferenceParsedRequest& pr) {
     if (req.prompt_batch.has_value()) {
         pr.input_texts = req.prompt_batch.value();
@@ -190,11 +210,7 @@ void InferenceService::inferResponse(int64_t                                    
     auto                                                ori_streams = engine_->batchEnqueue(inputs);
     for (size_t i = 0; i < ori_streams.size(); ++i) {
         if (ori_streams[i]->hasError()) {
-            for (size_t j = 0; j < ori_streams.size(); ++j) {
-                if (j != i && !ori_streams[j]->hasError()) {
-                    ori_streams[j]->reportError(ErrorCode::CANCELLED, "batch peer failed enqueue");
-                }
-            }
+            cancelBatchPeerStreams(ori_streams, "batch peer failed enqueue", static_cast<int>(i));
             auto error_info = ori_streams[i]->statusInfo();
             throw HttpApiServerException(transErrorCodeToHttpExceptionType(error_info.code()),
                                          error_info.ToString());
@@ -215,6 +231,7 @@ void InferenceService::inferResponse(int64_t                                    
         std::tie(iterate_count, complete_response) =
             iterateStreams(streams, writer, req, iterate_stage_timer, &response_started);
     } catch (const std::exception& e) {
+        cancelBatchPeerStreams(ori_streams, "batch peer failed during response iteration");
         if (req.is_streaming && response_started) {
             writer->SetWriteType(http_server::HttpResponseWriter::WriteType::Stream);
             writer->AddHeader("Content-Type", "text/event-stream");

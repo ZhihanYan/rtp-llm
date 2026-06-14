@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
+#include <limits>
 #include <thread>
 #include <torch/extension.h>
 
@@ -104,6 +105,108 @@ private:
 
 // ----------------------------- P2P Side-Channel Apply -----------------------------
 
+static bool matchesStopWordsAfterP2PFirstToken(GenerateStream* stream, int32_t first_token_id) {
+    const auto& generate_config = stream->generateConfig();
+    const auto  special_tokens  = stream->specialTokens();
+    auto        complete_tokens  = stream->completeTokenIdsVec(0);
+    complete_tokens.push_back(first_token_id);
+
+    for (const auto& stop_words : generate_config->stop_words_list) {
+        if (generate_config->ignore_eos && stop_words.size() == 1 && stop_words[0] == special_tokens.eos_token_id) {
+            continue;
+        }
+        if (complete_tokens.size() < stop_words.size()) {
+            continue;
+        }
+        if (std::equal(stop_words.rbegin(), stop_words.rend(), complete_tokens.rbegin())) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool p2pFirstTokenShouldCheckFinish(GenerateStream* stream, int32_t first_token_id) {
+    if (stream->seqLength() + 1 >= stream->maxTokenNum()) {
+        return true;
+    }
+
+    const auto& generate_config = stream->generateConfig();
+    if (stream->seqLength() + 1 < stream->inputLength() + generate_config->min_new_tokens) {
+        return false;
+    }
+
+    const auto special_tokens = stream->specialTokens();
+    if (!generate_config->ignore_eos && first_token_id == special_tokens.eos_token_id) {
+        return true;
+    }
+
+    return matchesStopWordsAfterP2PFirstToken(stream, first_token_id);
+}
+
+static bool validateSideChannelTensorPB(const TensorPB& tensor_pb, const std::string& tensor_name, std::string* error) {
+    size_t elem_size = 0;
+    size_t data_size = 0;
+    switch (tensor_pb.data_type()) {
+        case TensorPB::FP32:
+            elem_size = sizeof(float);
+            data_size = tensor_pb.fp32_data().size();
+            break;
+        case TensorPB::INT32:
+            elem_size = sizeof(int32_t);
+            data_size = tensor_pb.int32_data().size();
+            break;
+        case TensorPB::FP16:
+            elem_size = sizeof(c10::Half);
+            data_size = tensor_pb.fp16_data().size();
+            break;
+        case TensorPB::BF16:
+            elem_size = sizeof(c10::BFloat16);
+            data_size = tensor_pb.bf16_data().size();
+            break;
+        default:
+            *error = tensor_name + " has unsupported TensorPB data_type=" + std::to_string(tensor_pb.data_type());
+            return false;
+    }
+
+    uint64_t expected_elems = 1;
+    for (auto dim : tensor_pb.shape()) {
+        if (dim < 0) {
+            *error = tensor_name + " has negative shape dim=" + std::to_string(dim);
+            return false;
+        }
+        const uint64_t dim_u64 = static_cast<uint64_t>(dim);
+        if (dim_u64 != 0 && expected_elems > std::numeric_limits<uint64_t>::max() / dim_u64) {
+            *error = tensor_name + " shape overflow while computing element count";
+            return false;
+        }
+        expected_elems *= dim_u64;
+    }
+
+    const uint64_t expected_bytes = expected_elems * elem_size;
+    if (expected_bytes != data_size) {
+        *error = tensor_name + " byte size mismatch, expected=" + std::to_string(expected_bytes)
+                 + ", actual=" + std::to_string(data_size);
+        return false;
+    }
+    return true;
+}
+
+static bool convertSideChannelTensorPB(const TensorPB&    tensor_pb,
+                                       const std::string& tensor_name,
+                                       torch::Tensor*     output,
+                                       std::string*       error) {
+    if (!validateSideChannelTensorPB(tensor_pb, tensor_name, error)) {
+        return false;
+    }
+    try {
+        *output = TensorPbConvert::pbToTorch(tensor_pb);
+        return true;
+    } catch (const std::exception& e) {
+        *error = tensor_name + " pbToTorch failed: " + e.what();
+        return false;
+    }
+}
+
 // Extract P2P side-channel payload from FusedAsyncReadContext and apply to GenerateStream.
 // Returns true if P2P payload was found and applied, false otherwise.
 static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadContext>& read_context,
@@ -136,10 +239,20 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
     // stream_->mutex_ held.
     // 1. First token: append to stream
     if (payload->has_first_token) {
+        if (stream->hasNumBeams()) {
+            const std::string error_message =
+                "decode_entrance beam search does not support P2P first-token handoff, unique_key="
+                + stream->uniqueKey();
+            RTP_LLM_LOG_WARNING("%s", error_message.c_str());
+            stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED, error_message);
+            return true;
+        }
+        const bool first_token_should_finish = p2pFirstTokenShouldCheckFinish(stream, payload->first_token_id);
         stream->setIsContextStream(false);
         stream->step();
-        auto new_tokens                   = torch::zeros({(int64_t)stream->nextBatchSize(), 1}, torch::kInt32);
-        new_tokens.data_ptr<int32_t>()[0] = static_cast<int32_t>(payload->first_token_id);
+        auto new_tokens = torch::full({(int64_t)stream->nextBatchSize(), 1},
+                                      static_cast<int64_t>(payload->first_token_id),
+                                      torch::TensorOptions().dtype(torch::kInt32));
         stream->updateWithoutLock({.new_tokens             = new_tokens,
                                    .num_new_tokens         = 1,
                                    .hidden_states          = {},
@@ -152,7 +265,7 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
                                    .all_hidden_states      = {},
                                    .update_remote_generate = false,
                                    .force_update_info      = false,
-                                   .skip_finish_check      = true});
+                                   .skip_finish_check      = !first_token_should_finish});
     }
 
     // 2. Reuse lengths
@@ -202,11 +315,27 @@ static bool applyP2PSideChannelToStream(const std::shared_ptr<FusedAsyncReadCont
             stream->setProposeToken({});
             stream->setSPOutputBuffer(nullptr);
         } else {
-            auto propose_probs_t  = has_propose_probs ? TensorPbConvert::pbToTorch(payload->propose_probs) :
-                                                        torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
-            auto propose_hidden_t = has_propose_hidden ?
-                                        TensorPbConvert::pbToTorch(payload->propose_hidden) :
-                                        torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+            torch::Tensor propose_probs_t =
+                torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+            torch::Tensor propose_hidden_t =
+                torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+            std::string tensor_error;
+            if ((has_propose_probs
+                 && !convertSideChannelTensorPB(
+                     payload->propose_probs, "propose_probs", &propose_probs_t, &tensor_error))
+                || (has_propose_hidden
+                    && !convertSideChannelTensorPB(
+                        payload->propose_hidden, "propose_hidden", &propose_hidden_t, &tensor_error))) {
+                const std::string error_message =
+                    "decode_entrance invalid speculative side-channel for unique_key=" + stream->uniqueKey()
+                    + ": " + tensor_error;
+                RTP_LLM_LOG_WARNING("%s", error_message.c_str());
+                stream->setContainProposeToken(false);
+                stream->setProposeToken({});
+                stream->setSPOutputBuffer(nullptr);
+                stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED, error_message);
+                return true;
+            }
 
             std::vector<int> side_channel_tokens = payload->propose_tokens;
             stream->setReuseLength(stream->seqLength() - 1);

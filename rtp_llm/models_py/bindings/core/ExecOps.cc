@@ -276,12 +276,59 @@ void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoord
 
         std::vector<int> block_indices;
         if (group_type == CacheGroupType::LINEAR) {
-            block_indices.push_back(total_block_num - 1);
+            const size_t batch_offset = (param.decoder_batch_size + batch_id) * max_blocks_per_batch;
+            for (int index = total_block_num - 1; index >= 0; --index) {
+                if (*(offset_addr + batch_offset + index) != NULL_BLOCK_IDX) {
+                    block_indices.push_back(index);
+                    break;
+                }
+            }
+            if (block_indices.empty()) {
+                RTP_LLM_LOG_ERROR("writeCacheToConnector: no valid LINEAR block found, request_id=%ld, batch_id=%zu, "
+                                  "layer_id=%d, total_block_num=%d",
+                                  request_id,
+                                  batch_id,
+                                  param.layer_id,
+                                  total_block_num);
+                connector_coordinator->reportP2PCacheWriteFailure();
+                continue;
+            }
         } else {
             block_indices.reserve(total_block_num);
             for (int index = 0; index < total_block_num; ++index) {
                 block_indices.push_back(index);
             }
+        }
+
+        bool cache_indices_valid = true;
+        for (const int index : block_indices) {
+            if (index < 0 || index >= static_cast<int>(max_blocks_per_batch)) {
+                RTP_LLM_LOG_ERROR("writeCacheToConnector: invalid block index=%d (max_blocks_per_batch=%zu), "
+                                  "request_id=%ld, batch_id=%zu, layer_id=%d",
+                                  index,
+                                  max_blocks_per_batch,
+                                  request_id,
+                                  batch_id,
+                                  param.layer_id);
+                cache_indices_valid = false;
+                break;
+            }
+            const size_t cache_key_flat_index = batch_id * max_blocks_per_batch + static_cast<size_t>(index);
+            if (cache_key_flat_index >= param.cache_keys.size()) {
+                RTP_LLM_LOG_ERROR("writeCacheToConnector: cache_keys size mismatch, flat_index=%zu, "
+                                  "cache_keys_size=%zu, request_id=%ld, batch_id=%zu, layer_id=%d",
+                                  cache_key_flat_index,
+                                  param.cache_keys.size(),
+                                  request_id,
+                                  batch_id,
+                                  param.layer_id);
+                cache_indices_valid = false;
+                break;
+            }
+        }
+        if (!cache_indices_valid) {
+            connector_coordinator->reportP2PCacheWriteFailure();
+            continue;
         }
 
         auto kv_cache_resource = std::make_shared<KVCacheResource>();
@@ -341,7 +388,15 @@ void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoord
                 std::numeric_limits<int64_t>::max();
         auto layer_context =
             std::make_shared<WriteCacheLayerContext>(held_resource, request_id, makeConnectorEvent(event), deadline_ms);
-        connector_coordinator->asyncWriteByLayer(global_layer_id, layer_context);
+        auto async_context = connector_coordinator->asyncWriteByLayer(global_layer_id, layer_context);
+        if (!async_context) {
+            RTP_LLM_LOG_ERROR("writeCacheToConnector: asyncWriteByLayer failed, request_id=%ld, batch_id=%zu, "
+                              "layer_id=%d",
+                              request_id,
+                              batch_id,
+                              param.layer_id);
+            connector_coordinator->reportP2PCacheWriteFailure();
+        }
     }
 }
 
