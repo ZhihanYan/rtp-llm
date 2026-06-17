@@ -185,6 +185,9 @@ void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoord
     if (param.warmup || !connector_coordinator) {
         return;
     }
+    if (!param.decode_entrance || !connector_coordinator->hasP2PConnector()) {
+        return;
+    }
     if (!param.pd_separation || param.context_batch_size == 0) {
         return;
     }

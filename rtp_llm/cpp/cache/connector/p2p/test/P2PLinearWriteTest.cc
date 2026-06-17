@@ -26,7 +26,7 @@ public:
     }
 
     bool hasP2PConnector() const override {
-        return true;
+        return has_p2p_connector;
     }
 
     uint32_t convertToGlobalLayerId(int model_id, int layer_id) const override {
@@ -70,7 +70,8 @@ public:
     int64_t                          captured_request = -1;
     int                              called_layer_id  = -1;
     std::shared_ptr<KVCacheResource> captured_resource;
-    bool                             fail_async_write  = false;
+    bool                             has_p2p_connector = true;
+    bool                             fail_async_write = false;
     int                              write_failure_count = 0;
 };
 
@@ -80,6 +81,7 @@ CacheStoreInputs makeLinearInputs() {
     inputs.decoder_batch_size    = 0;
     inputs.tokens_per_block      = 8;
     inputs.pd_separation         = true;
+    inputs.decode_entrance       = true;
     inputs.model_id              = 0;
     inputs.layer_id              = 0;
     inputs.warmup                = false;
@@ -189,6 +191,34 @@ TEST(P2PLinearWriteTest, CacheKeyLengthMismatchIsReportedToCoordinator) {
     execWriteCacheStore(inputs, kv_cache_info, false, nullptr, &coordinator);
 
     EXPECT_EQ(coordinator.write_failure_count, 1);
+    EXPECT_EQ(coordinator.captured_resource, nullptr);
+    EXPECT_EQ(coordinator.called_layer_id, -1);
+}
+
+TEST(P2PLinearWriteTest, NonDecodeEntranceSkipsP2PWritePreparation) {
+    RecordingCoordinator coordinator;
+    KvCacheInfo          kv_cache_info;
+
+    auto inputs           = makeLinearInputs();
+    inputs.decode_entrance = false;
+
+    execWriteCacheStore(inputs, kv_cache_info, false, nullptr, &coordinator);
+
+    EXPECT_EQ(coordinator.write_failure_count, 0);
+    EXPECT_EQ(coordinator.captured_resource, nullptr);
+    EXPECT_EQ(coordinator.called_layer_id, -1);
+}
+
+TEST(P2PLinearWriteTest, MissingP2PConnectorSkipsP2PWritePreparation) {
+    RecordingCoordinator coordinator;
+    coordinator.has_p2p_connector = false;
+    KvCacheInfo kv_cache_info;
+
+    auto inputs = makeLinearInputs();
+
+    execWriteCacheStore(inputs, kv_cache_info, false, nullptr, &coordinator);
+
+    EXPECT_EQ(coordinator.write_failure_count, 0);
     EXPECT_EQ(coordinator.captured_resource, nullptr);
     EXPECT_EQ(coordinator.called_layer_id, -1);
 }

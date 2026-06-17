@@ -454,6 +454,14 @@ class BackendRPCServerVisitor:
                         if output_ids is not None:
                             chunk_output_ids.append(output_ids)
 
+                    if final_output.aux_info is None:
+                        for chunk_output in reversed(chunk_outputs[:-1]):
+                            if chunk_output.aux_info is not None:
+                                final_output.aux_info = copy.deepcopy(
+                                    chunk_output.aux_info
+                                )
+                                break
+
                     if not chunk_output_ids:
                         continue
 

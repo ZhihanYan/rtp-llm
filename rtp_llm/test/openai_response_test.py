@@ -2951,6 +2951,62 @@ class OpenaiResponseTest(IsolatedAsyncioTestCase):
         )
         self.assertTrue(results[0].generate_outputs[0].finished)
 
+    async def test_batch_enqueue_decode_entrance_finish_only_terminal_frame_keeps_aux_info(
+        self,
+    ):
+        pd_sep_config = PDSepConfig()
+        pd_sep_config.role_type = RoleType.FRONTEND
+        pd_sep_config.decode_entrance = True
+        visitor = BackendRPCServerVisitor(
+            max_seq_len=self.model_config.max_seq_len,
+            seq_size_per_block=64,
+            pd_sep_config=pd_sep_config,
+            addresses=["localhost:8080"],
+        )
+        visitor.host_service.service_available = False
+
+        def _fake_enqueue(_input_obj: GenerateInput):
+            async def _generator():
+                outputs1 = GenerateOutputs()
+                outputs1.generate_outputs.append(
+                    GenerateOutput(
+                        output_ids=torch.tensor([[10, 11]], dtype=torch.int32),
+                        finished=False,
+                        aux_info=AuxInfo(output_len=2, step_output_len=2),
+                    )
+                )
+                yield outputs1
+
+                outputs2 = GenerateOutputs()
+                outputs2.generate_outputs.append(
+                    GenerateOutput(
+                        finished=True,
+                        aux_info=None,
+                    )
+                )
+                yield outputs2
+
+            return _generator()
+
+        visitor.model_rpc_client.enqueue = _fake_enqueue
+
+        results = await visitor.batch_enqueue(
+            [
+                GenerateInput(
+                    request_id=24,
+                    token_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
+                    mm_inputs=[],
+                    generate_config=GenerateConfig(),
+                )
+            ]
+        )
+
+        self.assertEqual(results[0].generate_outputs[0].output_ids.tolist(), [[10, 11]])
+        self.assertTrue(results[0].generate_outputs[0].finished)
+        self.assertIsNotNone(results[0].generate_outputs[0].aux_info)
+        self.assertEqual(results[0].generate_outputs[0].aux_info.output_len, 2)
+        self.assertEqual(results[0].generate_outputs[0].aux_info.step_output_len, 2)
+
     async def test_batch_enqueue_decode_entrance_cancels_other_streams_on_error(self):
         pd_sep_config = PDSepConfig()
         pd_sep_config.role_type = RoleType.FRONTEND

@@ -60,6 +60,7 @@ public:
         if (callback_) {
             callback_(error_code, error_msg);
         }
+        delete this;
     }
 
 private:
