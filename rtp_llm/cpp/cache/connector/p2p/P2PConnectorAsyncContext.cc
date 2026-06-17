@@ -98,7 +98,8 @@ void P2PConnectorAsyncReadContext::checkDone() {
 // - hold 且当前时间仍早于 until_ms → 返回 true，调用方必须直接 return（短路），不推进子 result、不 merge。
 // - hold 且 lease 已全部 stopped → 清 hold、刷新两侧 result；若都已 done 则
 //   applyMergedReadOutcome(..., false) 终态合并（含成功补救），返回 true。
-// - hold 已到期但 lease 仍活跃 → 继续持有资源并延长下一次检查窗口，直到 allStopped，返回 true。
+// - hold 已到期但 lease 仍活跃 → 以当前 merged outcome 终结 async read，释放 decode KV 资源；
+//   lease poll 仅在窗口内争取"提前确认 allStopped"，不能无限续期。
 bool P2PConnectorAsyncReadContext::tryFinishExpiredLeaseHold() {
     if (!lease_hold_pending_.load(std::memory_order_acquire)) {
         return false;
@@ -118,16 +119,16 @@ bool P2PConnectorAsyncReadContext::tryFinishExpiredLeaseHold() {
             lease_poll_retry_count_.load());
     } else if (timed_out) {
         RTP_LLM_LOG_WARNING(
-            "tryFinishExpiredLeaseHold: hold timeout reached but leases still active, keep holding resources, "
+            "tryFinishExpiredLeaseHold: hold timeout reached with active leases, finishing async read and "
+            "releasing resources, "
             "unique_key=%s retries=%d",
             uniqueKey().c_str(),
             lease_poll_retry_count_.load());
-        lease_hold_until_ms_.store(currentTimeMs() + kLeasePollMaxIntervalMs, std::memory_order_relaxed);
-        return true;
     }
 
     lease_hold_pending_.store(false, std::memory_order_release);
     lease_hold_until_ms_.store(0, std::memory_order_relaxed);
+    lease_poll_next_ms_.store(0, std::memory_order_relaxed);
 
     if (!tp_sync_result_->done()) {
         tp_sync_result_->checkDone();
