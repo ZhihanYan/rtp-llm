@@ -25,6 +25,8 @@ from rtp_llm.utils.time_util import Timer
 
 route_logger = logging.getLogger("route_logger")
 
+DECODE_ENTRANCE_BATCH_FALLBACK_MAX_CONCURRENCY = 8
+
 
 class BackendRPCServerVisitor:
     def __init__(
@@ -152,6 +154,33 @@ class BackendRPCServerVisitor:
             for role in self.backend_role_list
             if role != RoleType.VIT or require_vit
         ]
+
+    def _supplement_batch_followup_role_addrs(self, input: GenerateInput) -> None:
+        specified_roles = {addr.role for addr in input.generate_config.role_addrs}
+        missing_roles = [
+            role
+            for role in self._required_backend_roles(input)
+            if role == RoleType.VIT and role not in specified_roles
+        ]
+        if not missing_roles:
+            return
+
+        role_addrs: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+            missing_roles
+        )
+        if role_addrs:
+            input.generate_config.role_addrs.extend(role_addrs)
+
+        final_roles = {addr.role for addr in input.generate_config.role_addrs}
+        unresolved_roles = [
+            role for role in missing_roles if role not in final_roles
+        ]
+        if unresolved_roles:
+            raise FtRuntimeException(
+                ExceptionType.ROUTE_ERROR,
+                "request_id=%s missing backend role addresses after batch routing: %s"
+                % (input.request_id, unresolved_roles),
+            )
 
     async def get_master_route_addrs(
         self, input: GenerateInput
@@ -375,6 +404,15 @@ class BackendRPCServerVisitor:
                 for input in inputs:
                     await self.route_ips(input)
 
+            parallelism = max(
+                1,
+                min(
+                    len(inputs),
+                    DECODE_ENTRANCE_BATCH_FALLBACK_MAX_CONCURRENCY,
+                ),
+            )
+            semaphore = asyncio.Semaphore(parallelism)
+
             def _output_token_len(output: GenerateOutput) -> int:
                 if output.output_ids is None:
                     return 0
@@ -432,10 +470,11 @@ class BackendRPCServerVisitor:
             async def _collect_final_output(
                 input: GenerateInput,
             ) -> GenerateOutputs:
-                chunks = []
-                async for output in self.model_rpc_client.enqueue(input):
-                    chunks.append(output)
-                return _merge_stream_outputs(chunks)
+                async with semaphore:
+                    chunks = []
+                    async for output in self.model_rpc_client.enqueue(input):
+                        chunks.append(output)
+                    return _merge_stream_outputs(chunks)
 
             # Decode-entrance needs the per-request prefill orchestration in
             # GenerateStreamCall. The legacy BatchGenerateCall path skips that.
@@ -470,10 +509,11 @@ class BackendRPCServerVisitor:
 
         if self.host_service.service_available:
             # /batch_infer sends the whole batch to one backend. Route only the
-            # first request here; ModelRpcClient.batch_enqueue will keep the
-            # batch on that target and reject only truly conflicting explicit
-            # backend selections carried by later requests.
+            # first request to choose the shared target backend. Follow-up
+            # requests still need per-request optional roles such as VIT.
             await self.route_ips(inputs[0])
+            for input in inputs[1:]:
+                self._supplement_batch_followup_role_addrs(input)
 
         return await self.model_rpc_client.batch_enqueue(inputs)
 
