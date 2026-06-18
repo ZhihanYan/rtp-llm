@@ -165,7 +165,7 @@ TEST(P2PLinearWriteTest, LinearGroupAllNullBlocksAreReportedToCoordinator) {
     EXPECT_EQ(coordinator.called_layer_id, -1);
 }
 
-TEST(P2PLinearWriteTest, InvalidBlockIndexIsReportedToCoordinator) {
+TEST(P2PLinearWriteTest, LinearGroupTooManyBlocksIsReportedBeforeOffsetScan) {
     RecordingCoordinator coordinator;
     KvCacheInfo          kv_cache_info;
 

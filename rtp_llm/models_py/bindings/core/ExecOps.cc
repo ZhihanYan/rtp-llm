@@ -279,6 +279,18 @@ void writeCacheToConnector(const CacheStoreInputs& param, IKVCacheConnectorCoord
 
         std::vector<int> block_indices;
         if (group_type == CacheGroupType::LINEAR) {
+            if (static_cast<size_t>(total_block_num) > max_blocks_per_batch) {
+                RTP_LLM_LOG_ERROR("writeCacheToConnector: LINEAR block count exceeds max_blocks_per_batch, "
+                                  "request_id=%ld, batch_id=%zu, layer_id=%d, total_block_num=%d, "
+                                  "max_blocks_per_batch=%zu",
+                                  request_id,
+                                  batch_id,
+                                  param.layer_id,
+                                  total_block_num,
+                                  max_blocks_per_batch);
+                connector_coordinator->reportP2PCacheWriteFailure();
+                continue;
+            }
             const size_t batch_offset = (param.decoder_batch_size + batch_id) * max_blocks_per_batch;
             for (int index = total_block_num - 1; index >= 0; --index) {
                 if (*(offset_addr + batch_offset + index) != NULL_BLOCK_IDX) {
