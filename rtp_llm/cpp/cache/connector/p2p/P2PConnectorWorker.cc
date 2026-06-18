@@ -42,11 +42,6 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
         rdma_mode ? "kBarexRdma" : "kTcp",
         env_raw ? env_raw : "(unset)");
 
-    if (rdma_mode) {
-        RTP_LLM_LOG_ERROR("init failed: BarexRdma backend is not supported in this build, set cache_store_rdma_mode=0");
-        return false;
-    }
-
     transfer::TransferBackendPair backend_pair;
     try {
         backend_pair = transfer::createTransferBackend(backend, config_.transfer_backend_config, metrics_reporter_);

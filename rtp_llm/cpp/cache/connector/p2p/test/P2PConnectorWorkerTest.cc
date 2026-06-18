@@ -1088,11 +1088,16 @@ TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextNotFound) {
     EXPECT_TRUE(cancel_result);
 }
 
-TEST_F(P2PConnectorWorkerTest, Init_ReturnFalse_WhenRdmaBackendUnsupported) {
+// In base/open-source builds kBarexRdma is intentionally unsupported and the
+// factory throws. RDMA-enabled internal builds select a different factory, so
+// this fallback-path test does not apply there.
+#ifndef USE_RDMA
+TEST_F(P2PConnectorWorkerTest, Init_ReturnFalse_WhenRdmaBackendUnsupportedInBaseBuild) {
     worker_config_.transfer_backend_config.cache_store_rdma_mode = true;
     P2PConnectorWorker worker(worker_config_, mock_layer_block_converter_, nullptr);
     EXPECT_FALSE(worker.init(10 * 1000));
 }
+#endif
 
 TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextFound) {
     int64_t     request_id  = 3006;
