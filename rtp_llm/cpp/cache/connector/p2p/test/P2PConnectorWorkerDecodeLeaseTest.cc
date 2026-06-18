@@ -1091,6 +1091,36 @@ TEST_F(DecodeLeaseRaceTest, F3_DelayedNotifyDoneAfterCancel) {
         read_thread.join();
 }
 
+TEST_F(DecodeLeaseRaceTest, StaleLeaseForceCancelsUnfinishedTasksBeforeReportingStopped) {
+    const std::string key        = "stale_lease_force_cancel";
+    auto              task_group = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    auto              task       = std::make_shared<InflightMockRecvTask>();
+    task->startTransfer();
+    task_group->lease = std::make_shared<DecodeTargetWriteLease>();
+    task_group->lease->onTransferStarted();
+    task_group->lease->seal();
+    task_group->tasks.push_back(task);
+
+    {
+        std::lock_guard<std::mutex> lock(decode_->lease_map_mutex_);
+        decode_->lease_map_[key] =
+            P2PConnectorWorkerDecode::LeaseMapEntry{task_group, 0, currentTimeMs() - decode_->kLeaseMapTtlMs - 1};
+    }
+
+    bool sealed, stopped;
+    int  started_ops, finished_ops;
+    bool found = decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
+
+    EXPECT_TRUE(found);
+    EXPECT_TRUE(sealed);
+    EXPECT_TRUE(stopped);
+    EXPECT_TRUE(task->done());
+    EXPECT_EQ(task->errorCode(), transfer::TransferErrorCode::CANCELLED);
+    EXPECT_EQ(started_ops, 1);
+    EXPECT_EQ(finished_ops, 1);
+    EXPECT_EQ(decode_->lease_map_.count(key), 0);
+}
+
 // F4: Stress test - rapid repeated queryLeaseStatus during async completion.
 TEST_F(DecodeLeaseRaceTest, F4_RapidQueryDuringAsyncCompletion) {
     const std::string key         = "f4_rapid_query";

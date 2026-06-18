@@ -149,8 +149,9 @@ public:
     }
 
     void evaluateWaitingStreams() {
-        // 清理 waiting_streams_ 中有错误的 stream
-        waiting_streams_.remove_if([](const auto& s) { return s->hasError(); });
+        // 清理 waiting_streams_ 中已无法调度的 stream
+        waiting_streams_.remove_if(
+            [](const auto& s) { return s->hasError() || s->getStatus() == StreamState::FINISHED; });
 
         std::list<GenerateStreamPtr> new_streams;
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
@@ -180,13 +181,14 @@ public:
                                   busy_wait_us,
                                   static_cast<int>(stream->getStatus()));
             }
-            // 过滤 FINISHED stream，仅将 RUNNING stream 加入 running_streams_
-            new_streams.remove_if([](const auto& s) { return s->getStatus() == StreamState::FINISHED; });
-            running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
             // 从waiting_streams_中移除已调度的stream
             for (auto& stream : new_streams) {
                 waiting_streams_.remove(stream);
             }
+            // 过滤 FINISHED / ERROR stream，仅将 RUNNING stream 加入 running_streams_
+            new_streams.remove_if(
+                [](const auto& s) { return s->hasError() || s->getStatus() == StreamState::FINISHED; });
+            running_streams_.insert(running_streams_.end(), new_streams.begin(), new_streams.end());
         }
     }
 

@@ -351,24 +351,86 @@ bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key) {
     return true;
 }
 
-void P2PConnectorWorkerDecode::evictStaleLeases() {
+int P2PConnectorWorkerDecode::refreshLeaseFinishedOps(LeaseMapEntry& entry) const {
+    if (!entry.task_group || !entry.task_group->lease) {
+        return 0;
+    }
+
+    int done_now = 0;
+    for (const auto& task : entry.task_group->tasks) {
+        if (task && task->done()) {
+            ++done_now;
+        }
+    }
+    const int newly_done = done_now - entry.finish_counted;
+    if (newly_done > 0) {
+        for (int i = 0; i < newly_done; ++i) {
+            entry.task_group->lease->onTransferFinished();
+        }
+        entry.finish_counted = done_now;
+    }
+    return done_now;
+}
+
+int P2PConnectorWorkerDecode::forceCancelUnfinishedTasks(const std::shared_ptr<ReadTaskGroup>& task_group) const {
+    if (!task_group) {
+        return 0;
+    }
+
+    int cancelled_count = 0;
+    task_group->cancelled.store(true);
+    for (const auto& task : task_group->tasks) {
+        if (!task || task->done()) {
+            continue;
+        }
+        task->cancel();
+        if (!task->done()) {
+            task->forceCancel();
+        }
+        ++cancelled_count;
+    }
+    return cancelled_count;
+}
+
+void P2PConnectorWorkerDecode::evictStaleLeases(const std::string& query_key) {
     int64_t now_ms = currentTimeMs();
     for (auto it = lease_map_.begin(); it != lease_map_.end();) {
-        if (now_ms - it->second.create_time_ms > kLeaseMapTtlMs) {
-            RTP_LLM_LOG_WARNING("evictStaleLeases: removing stale lease_map_ entry unique_key=%s, age_ms=%ld",
-                                it->first.c_str(),
-                                now_ms - it->second.create_time_ms);
+        LeaseMapEntry& entry          = it->second;
+        const int64_t  age_ms         = now_ms - entry.create_time_ms;
+        const bool     is_queried_key = it->first == query_key;
+
+        refreshLeaseFinishedOps(entry);
+        if (entry.task_group && entry.task_group->lease && entry.task_group->lease->isStopped()
+            && !is_queried_key) {
             it = lease_map_.erase(it);
-        } else {
-            ++it;
+            continue;
         }
+
+        if (age_ms > kLeaseMapTtlMs) {
+            const int cancelled_count = forceCancelUnfinishedTasks(entry.task_group);
+            const int done_count      = refreshLeaseFinishedOps(entry);
+            const int task_count      = entry.task_group ? static_cast<int>(entry.task_group->tasks.size()) : 0;
+            RTP_LLM_LOG_WARNING("evictStaleLeases: stale lease_map_ entry unique_key=%s, age_ms=%ld, "
+                                "cancelled_unfinished_tasks=%d, done_tasks=%d/%d",
+                                it->first.c_str(),
+                                age_ms,
+                                cancelled_count,
+                                done_count,
+                                task_count);
+            if (entry.task_group && entry.task_group->lease && entry.task_group->lease->isStopped()
+                && !is_queried_key) {
+                it = lease_map_.erase(it);
+                continue;
+            }
+        }
+        ++it;
     }
 }
 
 bool P2PConnectorWorkerDecode::queryLeaseStatus(
     const std::string& unique_key, bool& sealed, int& started_ops, int& finished_ops, bool& stopped) {
     std::lock_guard<std::mutex> lock(lease_map_mutex_);
-    evictStaleLeases();
+    evictStaleLeases(unique_key);
     auto                        it = lease_map_.find(unique_key);
     if (it == lease_map_.end()) {
         // Lease not in map — either never created or already cleaned up after all ops finished.
@@ -385,19 +447,7 @@ bool P2PConnectorWorkerDecode::queryLeaseStatus(
     const DecodeTargetWriteLease& lease      = *task_group->lease;
 
     // Count how many tasks have completed since last query and advance lease counters.
-    int done_now = 0;
-    for (const auto& task : task_group->tasks) {
-        if (task->done()) {
-            ++done_now;
-        }
-    }
-    const int newly_done = done_now - entry.finish_counted;
-    if (newly_done > 0) {
-        for (int i = 0; i < newly_done; ++i) {
-            task_group->lease->onTransferFinished();
-        }
-        entry.finish_counted = done_now;
-    }
+    refreshLeaseFinishedOps(entry);
 
     sealed       = lease.isSealed();
     started_ops  = lease.startedOps();
