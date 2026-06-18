@@ -79,7 +79,8 @@ private:
                                       int64_t                                          return_deadline_ms,
                                       const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
                                       const std::shared_ptr<SendTransferResult>&       transfer_result,
-                                      std::set<int>&                                   sent_layer_ids);
+                                      std::set<int>&                                   sent_layer_ids,
+                                      int&                                             expected_transfer_count);
 
     int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
                               const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
@@ -110,6 +111,7 @@ private:
                                        bool                                       timeout_cancelled_pending_tasks,
                                        bool                                       all_callbacks_received,
                                        int                                        sent_transfer_count,
+                                       int                                        expected_transfer_count,
                                        bool                                       all_layers_dispatched,
                                        size_t                                     sent_layer_count,
                                        int64_t                                    return_deadline_ms,

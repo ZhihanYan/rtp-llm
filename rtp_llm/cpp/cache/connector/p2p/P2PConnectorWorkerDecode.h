@@ -106,7 +106,7 @@ private:
     static constexpr int64_t kLeaseMapTtlMs = 600000;  // 10 min
 
     int  refreshLeaseFinishedOps(LeaseMapEntry& entry) const;
-    int  forceCancelUnfinishedTasks(const std::shared_ptr<ReadTaskGroup>& task_group) const;
+    int  cancelUnfinishedTasks(const std::shared_ptr<ReadTaskGroup>& task_group) const;
     void evictStaleLeases(const std::string& query_key);
     mutable std::mutex                             lease_map_mutex_;
     std::unordered_map<std::string, LeaseMapEntry> lease_map_;

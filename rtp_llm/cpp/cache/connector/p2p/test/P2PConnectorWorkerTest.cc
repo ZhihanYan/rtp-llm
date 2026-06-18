@@ -696,6 +696,55 @@ TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_SomeLayersNotTransferred) 
     EXPECT_TRUE(transferred_layers.find(0) != transferred_layers.end());
 }
 
+TEST_F(P2PConnectorWorkerTest, PartialPartitionDispatchDoesNotMarkLayerComplete) {
+    int64_t           request_id         = 20030;
+    const std::string unique_key         = "test_partial_partition_dispatch";
+    const int64_t     return_deadline_ms = currentTimeMs() + 50;
+
+    auto computed_buffer = std::make_shared<ComputedLayerCacheBuffer>(
+        request_id, createLayerCacheBuffer(/*layer_id=*/0), return_deadline_ms + 1000);
+
+    std::vector<AsymmetricTPContext> partition_ctxs;
+    for (int partition_id = 0; partition_id < 9; ++partition_id) {
+        partition_ctxs.emplace_back(
+            "127.0.0.1", 12345 + partition_id, 1, 0, 9, partition_id);
+    }
+
+    mock_sender_->setShouldSucceed(true);
+    mock_sender_->setAsyncCallback(true);
+    mock_sender_->setCallbackDelayMs(1);
+    mock_sender_->setBlockSend(true);
+
+    auto          cancel_flag     = std::make_shared<std::atomic<bool>>(false);
+    auto          transfer_result = std::make_shared<P2PConnectorWorkerPrefill::SendTransferResult>();
+    std::set<int> sent_layer_ids;
+    int           expected_transfer_count = 0;
+    const int     sent_transfer_count     = prefill_->dispatchPendingLayerTransfers(computed_buffer,
+                                                                                partition_ctxs,
+                                                                                unique_key,
+                                                                                return_deadline_ms,
+                                                                                cancel_flag,
+                                                                                transfer_result,
+                                                                                sent_layer_ids,
+                                                                                expected_transfer_count);
+
+    EXPECT_EQ(expected_transfer_count, 9);
+    EXPECT_LT(sent_transfer_count, expected_transfer_count);
+    EXPECT_TRUE(sent_layer_ids.empty());
+
+    cancel_flag->store(true);
+    std::shared_ptr<P2PConnectorWorkerPrefill::SendTransferResult> wake_result = transfer_result;
+    prefill_->releasePendingAsyncSendTasks(unique_key, &wake_result);
+    mock_sender_->setBlockSend(false);
+    {
+        std::unique_lock<std::mutex> lock(wake_result->result_mutex);
+        wake_result->result_cv.wait_for(lock, std::chrono::seconds(2), [&wake_result]() {
+            return wake_result->async_send_task_count.load(std::memory_order_relaxed) == 0;
+        });
+    }
+    EXPECT_EQ(wake_result->async_send_task_count.load(std::memory_order_relaxed), 0);
+}
+
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnTrue_AsymmetricTP_2P4D_Success) {
     int64_t     request_id  = 2004;
     std::string unique_key  = "test_asymmetric_all_success";

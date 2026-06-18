@@ -148,10 +148,36 @@ public:
         }
     }
 
+    bool isInactiveWaitingStream(const GenerateStreamPtr& stream) const {
+        return stream->hasError() || stream->getStatus() == StreamState::FINISHED;
+    }
+
+    void pruneInactiveWaitingStreams() {
+        waiting_streams_.remove_if([this](const auto& s) { return isInactiveWaitingStream(s); });
+    }
+
+    size_t activeWaitingStreamsSize() const {
+        size_t count = 0;
+        for (const auto& stream : waiting_streams_) {
+            if (!isInactiveWaitingStream(stream)) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    bool hasInactiveWaitingStreams() const {
+        for (const auto& stream : waiting_streams_) {
+            if (isInactiveWaitingStream(stream)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void evaluateWaitingStreams() {
         // 清理 waiting_streams_ 中已无法调度的 stream
-        waiting_streams_.remove_if(
-            [](const auto& s) { return s->hasError() || s->getStatus() == StreamState::FINISHED; });
+        pruneInactiveWaitingStreams();
 
         std::list<GenerateStreamPtr> new_streams;
         for (auto it = waiting_streams_.begin(); it != waiting_streams_.end(); it++) {
@@ -213,9 +239,10 @@ public:
     absl::StatusOr<std::list<GenerateStreamPtr>> schedule() override {
         std::unique_lock<std::mutex> lock(lock_);
         cond_.wait_for(lock, std::chrono::seconds(30), [this] {
-            return waiting_streams_.size() >= batch_size_ || running_streams_.size() > 0
+            return hasInactiveWaitingStreams() || activeWaitingStreamsSize() >= batch_size_ || running_streams_.size() > 0
                    || !loading_cache_streams_.empty();
         });
+        pruneInactiveWaitingStreams();
 
         auto schedule_start_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
@@ -225,7 +252,7 @@ public:
         evaluateAndUpdateStreams(running_streams_);
 
         size_t prev_running = running_streams_.size();
-        if (running_streams_.empty() && waiting_streams_.size() >= batch_size_) {
+        if (running_streams_.empty() && activeWaitingStreamsSize() >= batch_size_) {
             evaluateWaitingStreams();
             if (!running_streams_.empty()) {
                 initRunningStreams();

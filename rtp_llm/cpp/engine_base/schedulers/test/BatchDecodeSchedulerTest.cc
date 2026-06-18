@@ -26,9 +26,9 @@ protected:
     }
 };
 
-TEST_F(BatchDecodeSchedulerTest, FinishedCandidateIsRemovedFromWaitingQueue) {
+TEST_F(BatchDecodeSchedulerTest, FinishedCandidateIsRemovedBeforeFullBatch) {
     RuntimeConfig runtime_config;
-    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 1;
+    runtime_config.batch_decode_scheduler_config.batch_decode_scheduler_batch_size = 2;
     BatchDecodeScheduler scheduler(runtime_config, nullptr, nullptr);
 
     auto stream                      = createStream();

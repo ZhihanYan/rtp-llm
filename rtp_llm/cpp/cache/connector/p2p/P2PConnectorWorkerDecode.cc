@@ -372,7 +372,7 @@ int P2PConnectorWorkerDecode::refreshLeaseFinishedOps(LeaseMapEntry& entry) cons
     return done_now;
 }
 
-int P2PConnectorWorkerDecode::forceCancelUnfinishedTasks(const std::shared_ptr<ReadTaskGroup>& task_group) const {
+int P2PConnectorWorkerDecode::cancelUnfinishedTasks(const std::shared_ptr<ReadTaskGroup>& task_group) const {
     if (!task_group) {
         return 0;
     }
@@ -384,9 +384,6 @@ int P2PConnectorWorkerDecode::forceCancelUnfinishedTasks(const std::shared_ptr<R
             continue;
         }
         task->cancel();
-        if (!task->done()) {
-            task->forceCancel();
-        }
         ++cancelled_count;
     }
     return cancelled_count;
@@ -407,7 +404,7 @@ void P2PConnectorWorkerDecode::evictStaleLeases(const std::string& query_key) {
         }
 
         if (age_ms > kLeaseMapTtlMs) {
-            const int cancelled_count = forceCancelUnfinishedTasks(entry.task_group);
+            const int cancelled_count = cancelUnfinishedTasks(entry.task_group);
             const int done_count      = refreshLeaseFinishedOps(entry);
             const int task_count      = entry.task_group ? static_cast<int>(entry.task_group->tasks.size()) : 0;
             RTP_LLM_LOG_WARNING("evictStaleLeases: stale lease_map_ entry unique_key=%s, age_ms=%ld, "

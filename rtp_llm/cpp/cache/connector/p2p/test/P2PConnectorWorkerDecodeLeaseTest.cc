@@ -1091,8 +1091,8 @@ TEST_F(DecodeLeaseRaceTest, F3_DelayedNotifyDoneAfterCancel) {
         read_thread.join();
 }
 
-TEST_F(DecodeLeaseRaceTest, StaleLeaseForceCancelsUnfinishedTasksBeforeReportingStopped) {
-    const std::string key        = "stale_lease_force_cancel";
+TEST_F(DecodeLeaseRaceTest, StaleLeaseDoesNotReportStoppedUntilTransferDone) {
+    const std::string key        = "stale_lease_cancel_without_stop";
     auto              task_group = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
     auto              task       = std::make_shared<InflightMockRecvTask>();
     task->startTransfer();
@@ -1113,9 +1113,19 @@ TEST_F(DecodeLeaseRaceTest, StaleLeaseForceCancelsUnfinishedTasksBeforeReporting
 
     EXPECT_TRUE(found);
     EXPECT_TRUE(sealed);
+    EXPECT_FALSE(stopped);
+    EXPECT_FALSE(task->done());
+    EXPECT_TRUE(task->isCancelRequested());
+    EXPECT_EQ(started_ops, 1);
+    EXPECT_EQ(finished_ops, 0);
+    EXPECT_EQ(decode_->lease_map_.count(key), 1);
+
+    task->notifyDone(true);
+    found = decode_->queryLeaseStatus(key, sealed, started_ops, finished_ops, stopped);
+
+    EXPECT_TRUE(found);
+    EXPECT_TRUE(sealed);
     EXPECT_TRUE(stopped);
-    EXPECT_TRUE(task->done());
-    EXPECT_EQ(task->errorCode(), transfer::TransferErrorCode::CANCELLED);
     EXPECT_EQ(started_ops, 1);
     EXPECT_EQ(finished_ops, 1);
     EXPECT_EQ(decode_->lease_map_.count(key), 0);
