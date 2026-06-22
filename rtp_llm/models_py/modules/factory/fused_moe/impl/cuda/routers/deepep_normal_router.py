@@ -1,3 +1,4 @@
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -31,6 +32,14 @@ from rtp_llm.models_py.modules.factory.fused_moe.utils.config_resolver import (
 )
 from rtp_llm.models_py.utils.arch import get_sm
 from rtp_llm.ops.compute_ops import trt_fp8_quantize_128
+
+
+def _tensor_shape(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return tuple(value.shape)
+    if isinstance(value, tuple):
+        return tuple(_tensor_shape(item) for item in value)
+    return type(value).__name__
 
 
 class DeepepNormalRouterBase(FusedMoeDataRouter):
@@ -97,6 +106,25 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
 
         slice_begin = min(tp_token_size * tp_rank, token_num)
         slice_size = min(token_num - slice_begin, tp_token_size)
+        logging.info(
+            "[DEEPEP-DIAG] DeepEpNormalRouter.prepare enter, "
+            "ep_rank=%s, ep_size=%s, dp_rank=%s, dp_size=%s, tp_rank=%s, tp_size=%s, "
+            "token_num=%s, tp_token_size=%s, slice_begin=%s, slice_size=%s, "
+            "a1_shape=%s, topk_ids_shape=%s, topk_weights_shape=%s",
+            self.ep_rank,
+            self.ep_size,
+            self.dp_rank,
+            self.dp_size,
+            self.tp_rank,
+            self.tp_size,
+            token_num,
+            tp_token_size,
+            slice_begin,
+            slice_size,
+            tuple(a1.shape),
+            tuple(topk_ids.shape),
+            tuple(topk_weights.shape),
+        )
 
         # Apply quantization
         use_fp8 = (
@@ -122,6 +150,17 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             torch.int64
         )
         tp_expert_scales = torch.narrow(topk_weights, 0, slice_begin, slice_size)
+        logging.info(
+            "[DEEPEP-DIAG] DeepEpNormalRouter.prepare before-get-dispatch-layout, "
+            "ep_rank=%s, tp_rank=%s, slice_size=%s, tp_expert_input_shape=%s, "
+            "tp_expert_ids_shape=%s, tp_expert_scales_shape=%s",
+            self.ep_rank,
+            self.tp_rank,
+            slice_size,
+            _tensor_shape(tp_expert_input),
+            tuple(tp_expert_ids.shape),
+            tuple(tp_expert_scales.shape),
+        )
 
         (
             num_tokens_per_rank,
@@ -132,8 +171,27 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         ) = self.deepep_buffer_wrapper.buffer.get_dispatch_layout(
             tp_expert_ids, self.expert_num
         )
+        logging.info(
+            "[DEEPEP-DIAG] DeepEpNormalRouter.prepare after-get-dispatch-layout, "
+            "ep_rank=%s, tp_rank=%s, num_tokens_per_rank_shape=%s, "
+            "num_tokens_per_rdma_rank_shape=%s, num_tokens_per_expert_shape=%s, "
+            "is_token_in_rank_shape=%s",
+            self.ep_rank,
+            self.tp_rank,
+            _tensor_shape(num_tokens_per_rank),
+            _tensor_shape(num_tokens_per_rdma_rank),
+            _tensor_shape(num_tokens_per_expert),
+            _tensor_shape(is_token_in_rank),
+        )
 
         # dispatch
+        logging.info(
+            "[DEEPEP-DIAG] DeepEpNormalRouter.prepare before-dispatch, "
+            "ep_rank=%s, tp_rank=%s, tp_expert_input_shape=%s",
+            self.ep_rank,
+            self.tp_rank,
+            _tensor_shape(tp_expert_input),
+        )
         (
             output,
             recv_topk_idx,
@@ -151,6 +209,17 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
             tp_expert_ids,
             tp_expert_scales,
             expert_alignment=self.expert_alignment,
+        )
+        logging.info(
+            "[DEEPEP-DIAG] DeepEpNormalRouter.prepare after-dispatch, "
+            "ep_rank=%s, tp_rank=%s, output_shape=%s, recv_topk_idx_shape=%s, "
+            "recv_topk_weights_shape=%s, num_recv_tokens_per_expert_len=%s",
+            self.ep_rank,
+            self.tp_rank,
+            _tensor_shape(output),
+            _tensor_shape(recv_topk_idx),
+            _tensor_shape(recv_topk_weights),
+            len(num_recv_tokens_per_expert_list),
         )
 
         expert_x_scale: Optional[torch.Tensor] = None
@@ -200,8 +269,25 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
     ) -> torch.Tensor:
         assert self.handle is not None, "handler is None"
         assert payload.fused_expert_output is not None, "fused_expert_output is None"
+        logging.info(
+            "[DEEPEP-DIAG] DeepEpNormalRouter.finalize before-combine, "
+            "ep_rank=%s, tp_rank=%s, fused_expert_output_shape=%s, topk_ids_shape=%s, "
+            "topk_weights_shape=%s",
+            self.ep_rank,
+            self.tp_rank,
+            _tensor_shape(payload.fused_expert_output),
+            tuple(topk_ids.shape),
+            tuple(topk_weights.shape),
+        )
         out_token, _, _ = self.deepep_buffer_wrapper.buffer.combine(
             payload.fused_expert_output, self.handle
+        )
+        logging.info(
+            "[DEEPEP-DIAG] DeepEpNormalRouter.finalize after-combine, "
+            "ep_rank=%s, tp_rank=%s, out_token_shape=%s",
+            self.ep_rank,
+            self.tp_rank,
+            tuple(out_token.shape),
         )
         self.handle = None
 
@@ -212,6 +298,16 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
         tp_token_size = (original_num_tokens + tp_size - 1) // tp_size
 
         if tp_size > 1:
+            logging.info(
+                "[DEEPEP-DIAG] DeepEpNormalRouter.finalize before-tp-all-gather, "
+                "ep_rank=%s, tp_rank=%s, original_num_tokens=%s, tp_token_size=%s, "
+                "out_token_shape=%s",
+                self.ep_rank,
+                self.tp_rank,
+                original_num_tokens,
+                tp_token_size,
+                tuple(out_token.shape),
+            )
             # combine_x.size(0) might be 0
             if out_token.size(0) < tp_token_size:
                 padding_out_token = torch.empty(
@@ -225,6 +321,13 @@ class DeepepNormalRouterBase(FusedMoeDataRouter):
                 tp_size * tp_token_size, -1
             )
             gatherd_output = gatherd_output[:original_num_tokens, :]
+            logging.info(
+                "[DEEPEP-DIAG] DeepEpNormalRouter.finalize after-tp-all-gather, "
+                "ep_rank=%s, tp_rank=%s, gathered_output_shape=%s",
+                self.ep_rank,
+                self.tp_rank,
+                tuple(gatherd_output.shape),
+            )
             return gatherd_output
 
         # out_token should be a tensor with shape and dtype like a1

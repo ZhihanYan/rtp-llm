@@ -43,6 +43,26 @@ void releaseHostMemoryCache() {
     RTP_LLM_LOG_DEBUG("malloc_trim not available on this platform");
 #endif
 }
+
+size_t countFakeStreams(const std::list<GenerateStreamPtr>& streams) {
+    size_t count = 0;
+    for (const auto& stream : streams) {
+        if (stream && stream->isFakeStream()) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+size_t countContextStreams(const std::list<GenerateStreamPtr>& streams) {
+    size_t count = 0;
+    for (const auto& stream : streams) {
+        if (stream && stream->isContextStream()) {
+            ++count;
+        }
+    }
+    return count;
+}
 }  // anonymous namespace
 
 NormalEngine::NormalEngine(const EngineInitParams&                       params,
@@ -471,16 +491,48 @@ absl::Status NormalEngine::step() {
             RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.schedule(reserve_step=%d)", reserve_step_);
             CHECK_AND_ASSIGN(streams, scheduler_->schedule());
         }
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalEngine::step after-schedule, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld, role_type=%d, streams=%zu, fake_streams=%zu, context_streams=%zu",
+                         parallelism_config.world_rank,
+                         parallelism_config.dp_rank,
+                         parallelism_config.tp_rank,
+                         static_cast<int>(pd_sep_config.role_type),
+                         streams.size(),
+                         countFakeStreams(streams),
+                         countContextStreams(streams));
         if (parallelism_config.dp_size > 1) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.may_add_fake_stream_work");
             mayAddFakeStream(streams);
+            RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalEngine::step after-mayAddFakeStream, world_rank=%ld, "
+                             "dp_rank=%ld, tp_rank=%ld, role_type=%d, streams=%zu, fake_streams=%zu, "
+                             "context_streams=%zu",
+                             parallelism_config.world_rank,
+                             parallelism_config.dp_rank,
+                             parallelism_config.tp_rank,
+                             static_cast<int>(pd_sep_config.role_type),
+                             streams.size(),
+                             countFakeStreams(streams),
+                             countContextStreams(streams));
         }
         // When TP > 1, all ranks must enter process() together so that
         // tpSyncModelInputs (collective broadcast) does not deadlock.
         // The skip_run flag inside process() handles the "no work" case.
         if (streams.empty() && parallelism_config.tp_size <= 1) {
+            RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalEngine::step return-empty-single-tp, world_rank=%ld, "
+                             "dp_rank=%ld, tp_rank=%ld",
+                             parallelism_config.world_rank,
+                             parallelism_config.dp_rank,
+                             parallelism_config.tp_rank);
             return absl::OkStatus();
         }
+    } else {
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalEngine::step no-local-schedule, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld, role_type=%d, ffn_service=%d",
+                         parallelism_config.world_rank,
+                         parallelism_config.dp_rank,
+                         parallelism_config.tp_rank,
+                         static_cast<int>(pd_sep_config.role_type),
+                         ffn_disaggregate_config.is_ffn_service() ? 1 : 0);
     }
 
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
@@ -505,7 +557,23 @@ absl::Status NormalEngine::step() {
 
     {
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalEngine::step before-executor-process, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld, streams=%zu, fake_streams=%zu, context_streams=%zu",
+                         parallelism_config.world_rank,
+                         parallelism_config.dp_rank,
+                         parallelism_config.tp_rank,
+                         streams.size(),
+                         countFakeStreams(streams),
+                         countContextStreams(streams));
         status = executor_->process(streams);
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalEngine::step after-executor-process, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld, streams=%zu, status_ok=%d, status=%s",
+                         parallelism_config.world_rank,
+                         parallelism_config.dp_rank,
+                         parallelism_config.tp_rank,
+                         streams.size(),
+                         status.ok() ? 1 : 0,
+                         status.ToString().c_str());
     }
 
     // tick profiler after process() to count this step (and stop when num_steps reached).

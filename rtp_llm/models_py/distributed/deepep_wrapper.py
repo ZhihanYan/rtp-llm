@@ -354,6 +354,7 @@ class DeepEPWrapper:
                             "DeepEP state is inconsistent, _initialized is False but _instance is not None"
                         )
                     logging.info("Start initialize DeepEP wrapper")
+                    logging.info("[DEEPEP-DIAG] DeepEPWrapper.create config: %s", config)
                     DeepEPWrapper._instance = DeepEPWrapper(
                         torch.distributed.group.WORLD, config
                     )
@@ -514,6 +515,21 @@ class DeepEPWrapper:
             else:
                 init_kwargs["allow_mnnvl"] = False
 
+        logging.info(
+            "[DEEPEP-DIAG] DeepEPWrapper init normal buffer, ep_rank=%s, ep_size=%s, "
+            "tp_size=%s, local_rank=%s, world_size=%s, use_internode=%s, "
+            "num_nvl_bytes=%s, num_rdma_bytes=%s, num_qps_per_rank=%s, use_accl_ep=%s",
+            config.ep_rank,
+            config.ep_size,
+            config.tp_size,
+            config.local_rank,
+            config.world_size,
+            config.use_deepep_internode,
+            num_nvl_bytes,
+            num_rdma_bytes,
+            num_qps_per_rank,
+            self._use_accl_ep,
+        )
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _init_low_latency_buffer(self, group: ProcessGroup) -> DeepEPBuffer:

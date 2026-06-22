@@ -1,13 +1,41 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
+namespace {
+
+int64_t tensorNumel(const torch::Tensor& tensor) {
+    return tensor.defined() ? tensor.numel() : 0;
+}
+
+}  // namespace
+
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] tpSyncModelInputs bypass-single-tp, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld, tp_size=%ld",
+                         parallelism_config.world_rank,
+                         parallelism_config.dp_rank,
+                         parallelism_config.tp_rank,
+                         parallelism_config.tp_size);
         return;
     }
+    RTP_LLM_LOG_INFO("[DEEPEP-DIAG] tpSyncModelInputs enter, world_rank=%ld, dp_rank=%ld, tp_rank=%ld, "
+                     "tp_size=%ld, skip_in=%d, is_fake_stream_in=%d, combo_tokens=%ld, input_lengths=%ld, "
+                     "prefix_lengths=%ld, request_id=%ld",
+                     parallelism_config.world_rank,
+                     parallelism_config.dp_rank,
+                     parallelism_config.tp_rank,
+                     parallelism_config.tp_size,
+                     inputs.skip_run ? 1 : 0,
+                     inputs.is_fake_stream ? 1 : 0,
+                     tensorNumel(inputs.combo_tokens),
+                     tensorNumel(inputs.input_lengths),
+                     tensorNumel(inputs.prefix_lengths),
+                     tensorNumel(inputs.request_id));
     const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
     auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
     auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
@@ -65,6 +93,20 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    RTP_LLM_LOG_INFO("[DEEPEP-DIAG] tpSyncModelInputs before-shape-broadcast, world_rank=%ld, dp_rank=%ld, "
+                     "tp_rank=%ld, skip_hint=%d, is_fake_hint=%d, combo_hint=%d, input_lengths_hint=%d, "
+                     "prefix_lengths_hint=%d, request_len_hint=%d, mm_features_num=%d, mm_extra_input_num=%d",
+                     parallelism_config.world_rank,
+                     parallelism_config.dp_rank,
+                     parallelism_config.tp_rank,
+                     shape_hints_ptr[GptModelInputIndex::skipRun],
+                     shape_hints_ptr[GptModelInputIndex::isFakeStream],
+                     shape_hints_ptr[GptModelInputIndex::comboTokens],
+                     shape_hints_ptr[GptModelInputIndex::inputLengths],
+                     shape_hints_ptr[GptModelInputIndex::prefixLengths],
+                     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength],
+                     shape_hints_ptr[GptModelInputIndex::mmFeaturesNum],
+                     shape_hints_ptr[GptModelInputIndex::mmHasExtraInput]);
     execBroadcast({{shape_hints_t}, 0});
     execSyncCommunication(false);
     cudaCurrentStreamSyncAndCheck();
@@ -78,7 +120,24 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_logits                 = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.skip_run                        = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream                  = shape_hints_ptr[GptModelInputIndex::isFakeStream];
+    RTP_LLM_LOG_INFO("[DEEPEP-DIAG] tpSyncModelInputs after-shape-broadcast, world_rank=%ld, dp_rank=%ld, "
+                     "tp_rank=%ld, skip_after_shape=%d, is_fake_after_shape=%d, combo_hint=%d, "
+                     "input_lengths_hint=%d, prefix_lengths_hint=%d, request_len_hint=%d",
+                     parallelism_config.world_rank,
+                     parallelism_config.dp_rank,
+                     parallelism_config.tp_rank,
+                     inputs.skip_run ? 1 : 0,
+                     inputs.is_fake_stream ? 1 : 0,
+                     shape_hints_ptr[GptModelInputIndex::comboTokens],
+                     shape_hints_ptr[GptModelInputIndex::inputLengths],
+                     shape_hints_ptr[GptModelInputIndex::prefixLengths],
+                     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength]);
     if (inputs.skip_run) {
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] tpSyncModelInputs return-skip-after-shape, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld",
+                         parallelism_config.world_rank,
+                         parallelism_config.dp_rank,
+                         parallelism_config.tp_rank);
         return;
     }
     const size_t mm_features_num = shape_hints_ptr[GptModelInputIndex::mmFeaturesNum];
@@ -341,6 +400,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     execBroadcast({packed_buffers, 0});
     cudaCurrentStreamSyncAndCheck();
+    RTP_LLM_LOG_INFO("[DEEPEP-DIAG] tpSyncModelInputs after-payload-broadcast, world_rank=%ld, dp_rank=%ld, "
+                     "tp_rank=%ld, cpu_entries=%zu, gpu_entries=%zu, cpu_total_bytes=%ld, gpu_total_bytes=%ld",
+                     parallelism_config.world_rank,
+                     parallelism_config.dp_rank,
+                     parallelism_config.tp_rank,
+                     cpu_entries.size(),
+                     gpu_entries.size(),
+                     cpu_total_bytes,
+                     gpu_total_bytes);
 
     // Unpack from packed buffers back to each tensor's original storage.
     if (!is_root) {
@@ -358,6 +426,18 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             }
         }
     }
+    RTP_LLM_LOG_INFO("[DEEPEP-DIAG] tpSyncModelInputs exit, world_rank=%ld, dp_rank=%ld, tp_rank=%ld, "
+                     "skip_out=%d, is_fake_stream_out=%d, combo_tokens=%ld, input_lengths=%ld, "
+                     "prefix_lengths=%ld, request_id=%ld",
+                     parallelism_config.world_rank,
+                     parallelism_config.dp_rank,
+                     parallelism_config.tp_rank,
+                     inputs.skip_run ? 1 : 0,
+                     inputs.is_fake_stream ? 1 : 0,
+                     tensorNumel(inputs.combo_tokens),
+                     tensorNumel(inputs.input_lengths),
+                     tensorNumel(inputs.prefix_lengths),
+                     tensorNumel(inputs.request_id));
 }
 
 }  // namespace rtp_llm

@@ -5,6 +5,7 @@
 #include <memory>
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/Sampler.h"
@@ -16,6 +17,34 @@ using namespace std;
 namespace rtp_llm {
 
 NormalExecutor::ModelFactory NormalExecutor::test_model_factory = nullptr;
+
+namespace {
+
+size_t countFakeStreams(const std::list<GenerateStreamPtr>& streams) {
+    size_t count = 0;
+    for (const auto& stream : streams) {
+        if (stream && stream->isFakeStream()) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+size_t countContextStreams(const std::list<GenerateStreamPtr>& streams) {
+    size_t count = 0;
+    for (const auto& stream : streams) {
+        if (stream && stream->isContextStream()) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+int64_t tensorNumel(const torch::Tensor& tensor) {
+    return tensor.defined() ? tensor.numel() : 0;
+}
+
+}  // namespace
 
 NormalExecutor::~NormalExecutor() {
     cudaProfilerEnd();
@@ -124,6 +153,16 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     GptModelOutputs                model_output;
     SamplerOutput                  sampler_output;
     RTP_LLM_PROFILE_FUNCTION();
+    RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalExecutor::process entry, world_rank=%ld, dp_rank=%ld, tp_rank=%ld, "
+                     "streams=%zu, fake_streams=%zu, context_streams=%zu, warm_up=%d, enable_ffn_disaggregate=%d",
+                     parallelism_config_.world_rank,
+                     parallelism_config_.dp_rank,
+                     parallelism_config_.tp_rank,
+                     streams.size(),
+                     countFakeStreams(streams),
+                     countContextStreams(streams),
+                     warm_up_ ? 1 : 0,
+                     enable_ffn_disaggregate_ ? 1 : 0);
     {
         RTP_LLM_PROFILE_SCOPE("executor.gather_model_input");
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -131,13 +170,59 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         RETURN_IF_STATUS_OR_ERROR(model_input_status);
         model_input                              = std::move(model_input_status.value());
         executor_collector.gather_model_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalExecutor::process after-gather, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld, streams=%zu, is_fake_stream=%d, pd_separation=%d, combo_tokens=%ld, "
+                         "input_lengths=%ld, prefix_lengths=%ld, request_id=%ld, gather_us=%ld",
+                         parallelism_config_.world_rank,
+                         parallelism_config_.dp_rank,
+                         parallelism_config_.tp_rank,
+                         streams.size(),
+                         model_input.is_fake_stream ? 1 : 0,
+                         model_input.pd_separation ? 1 : 0,
+                         tensorNumel(model_input.combo_tokens),
+                         tensorNumel(model_input.input_lengths),
+                         tensorNumel(model_input.prefix_lengths),
+                         tensorNumel(model_input.request_id),
+                         executor_collector.gather_model_input_us);
     }
     {
         RTP_LLM_PROFILE_SCOPE("executor.tp_sync_input");
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_input.skip_run  = streams.empty() && !enable_ffn_disaggregate_;
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalExecutor::process before-tpSyncModelInputs, world_rank=%ld, "
+                         "dp_rank=%ld, tp_rank=%ld, streams_empty=%d, skip_before=%d, is_fake_stream=%d, "
+                         "combo_tokens=%ld, input_lengths=%ld, prefix_lengths=%ld, request_id=%ld",
+                         parallelism_config_.world_rank,
+                         parallelism_config_.dp_rank,
+                         parallelism_config_.tp_rank,
+                         streams.empty() ? 1 : 0,
+                         model_input.skip_run ? 1 : 0,
+                         model_input.is_fake_stream ? 1 : 0,
+                         tensorNumel(model_input.combo_tokens),
+                         tensorNumel(model_input.input_lengths),
+                         tensorNumel(model_input.prefix_lengths),
+                         tensorNumel(model_input.request_id));
         tpSyncModelInputs(model_input, parallelism_config_);
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalExecutor::process after-tpSyncModelInputs, world_rank=%ld, "
+                         "dp_rank=%ld, tp_rank=%ld, skip_after=%d, is_fake_stream=%d, pd_separation=%d, "
+                         "combo_tokens=%ld, input_lengths=%ld, prefix_lengths=%ld, request_id=%ld, tp_sync_us=%ld",
+                         parallelism_config_.world_rank,
+                         parallelism_config_.dp_rank,
+                         parallelism_config_.tp_rank,
+                         model_input.skip_run ? 1 : 0,
+                         model_input.is_fake_stream ? 1 : 0,
+                         model_input.pd_separation ? 1 : 0,
+                         tensorNumel(model_input.combo_tokens),
+                         tensorNumel(model_input.input_lengths),
+                         tensorNumel(model_input.prefix_lengths),
+                         tensorNumel(model_input.request_id),
+                         autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us);
         if (model_input.skip_run) {
+            RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalExecutor::process return-skip-run, world_rank=%ld, dp_rank=%ld, "
+                             "tp_rank=%ld",
+                             parallelism_config_.world_rank,
+                             parallelism_config_.dp_rank,
+                             parallelism_config_.tp_rank);
             return absl::OkStatus();
         }
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
@@ -166,8 +251,32 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
                                       stream_groups.modelExecuteTokenSize(),
                                       stream_groups.maxSeqLen());
         int64_t start_time_us               = autil::TimeUtility::currentTimeInMicroSeconds();
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalExecutor::process before-model-forward, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld, streams=%zu, stream_groups_ctx=%zu, stream_groups_decode=%zu, "
+                         "stream_groups_tokens=%zu, skip_run=%d, is_fake_stream=%d, combo_tokens=%ld, "
+                         "input_lengths=%ld, prefix_lengths=%ld, request_id=%ld",
+                         parallelism_config_.world_rank,
+                         parallelism_config_.dp_rank,
+                         parallelism_config_.tp_rank,
+                         streams.size(),
+                         stream_groups.totalContextBatchSize(),
+                         stream_groups.totalDecodeBatchSize(),
+                         stream_groups.modelExecuteTokenSize(),
+                         model_input.skip_run ? 1 : 0,
+                         model_input.is_fake_stream ? 1 : 0,
+                         tensorNumel(model_input.combo_tokens),
+                         tensorNumel(model_input.input_lengths),
+                         tensorNumel(model_input.prefix_lengths),
+                         tensorNumel(model_input.request_id));
         model_output                        = std::move(model_->forward(model_input));
         executor_collector.model_forward_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalExecutor::process after-model-forward, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld, streams=%zu, model_forward_us=%ld",
+                         parallelism_config_.world_rank,
+                         parallelism_config_.dp_rank,
+                         parallelism_config_.tp_rank,
+                         streams.size(),
+                         executor_collector.model_forward_us);
     }
     if (expert_balancer_) {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -176,6 +285,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     }
 
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
+        RTP_LLM_LOG_INFO("[DEEPEP-DIAG] NormalExecutor::process return-before-sampler, world_rank=%ld, dp_rank=%ld, "
+                         "tp_rank=%ld, streams=%zu, warm_up=%d",
+                         parallelism_config_.world_rank,
+                         parallelism_config_.dp_rank,
+                         parallelism_config_.tp_rank,
+                         streams.size(),
+                         warm_up_ ? 1 : 0);
         cudaCurrentStreamSyncAndCheck();
         model_->releaseBuffers();
         return absl::OkStatus();
